@@ -45,7 +45,7 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=raw,value=dev
-            type=sha,prefix=dev-,format=short
+            type=raw,value=dev-${{ github.sha }}
           # Nothing here is a release: no `latest`, and no second tag that a
           # store could accidentally pin to a moving name.
           flavor: latest=false
@@ -61,9 +61,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # The store pins the multi-arch index digest, never a per-arch one.
+      # The store pins the multi-arch index digest, never a per-arch one. The
+      # tag is the full commit, so what the store pins names the exact commit
+      # its image was built from.
       - name: Check both architectures
         run: |
-          docker buildx imagetools inspect "${IMAGE}:dev-${GITHUB_SHA::7}" | tee manifest.txt
+          docker buildx imagetools inspect "${IMAGE}:dev-${GITHUB_SHA}" | tee manifest.txt
           grep -q 'linux/amd64' manifest.txt && grep -q 'linux/arm64' manifest.txt
-          echo "image: ${IMAGE}:dev-${GITHUB_SHA::7}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "image: ${IMAGE}:dev-${GITHUB_SHA}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
