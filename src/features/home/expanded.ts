@@ -15,6 +15,9 @@ function load(): Record<string, boolean> {
 
 const useStore = create<{ open: Record<string, boolean> }>(() => ({ open: load() }))
 
+/** The sidebar key for a group's conversations fold (agents use their own id). */
+export const groupFold = (id: string) => `group:${id}`
+
 /** Whether `id` is expanded: your choice, else open while it's the agent you're in. */
 export const useExpanded = (id: string, active: boolean) => useStore((s) => s.open[id] ?? active)
 

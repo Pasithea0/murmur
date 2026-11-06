@@ -3,25 +3,27 @@ import { Button } from '@/ui/button'
 import { TextField } from '@/ui/field'
 import { BuddyStack } from '@/ui/buddy'
 import { Sheet } from '@/ui/sheet'
-import type { Group } from '@/state/groups'
 
 // Give a conversation a name of your own, from its row's menu. Hermes names a
 // conversation after what was first asked and has no name of its own for one,
 // so this is this device's: clearing it goes back to the first line.
 
+/** A group's members, as its faces. */
+export type Faces = { hues: number[]; seeds: string[] }
+
 /** Hermes's longest title, which a conversation's is too. */
 const MAX = 100
 
 type Props = {
-  /** Undefined until the group has loaded: the sheet's faces come from it. */
-  group?: Group
+  /** The faces over the field: the group's members. */
+  faces: Faces
   /** The conversation being renamed; null when the sheet is closed. */
   conversation: { id: string; title: string } | null
   onClose: () => void
   onRename: (title: string) => void
 }
 
-export function RenameConversationSheet({ group, conversation, onClose, onRename }: Props) {
+export function RenameConversationSheet({ faces, conversation, onClose, onRename }: Props) {
   // Kept while the sheet closes, so it doesn't empty as it goes.
   const [shown, setShown] = useState(conversation)
   const [name, setName] = useState(conversation?.title ?? '')
@@ -46,7 +48,7 @@ export function RenameConversationSheet({ group, conversation, onClose, onRename
           save()
         }}
       >
-        <BuddyStack hues={(group?.members ?? []).map((m) => m.hue)} seeds={(group?.members ?? []).map((m) => m.id)} size={56} />
+        <BuddyStack hues={faces.hues} seeds={faces.seeds} size={56} />
         <div className="mt-6 w-full">
           <TextField
             value={name}

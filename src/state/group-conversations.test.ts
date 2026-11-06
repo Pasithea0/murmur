@@ -10,6 +10,7 @@ vi.mock('@/hermes/gateway', () => ({
   gateway: { onEvent: () => {}, onRequest: () => {}, onState: () => {} },
   rpc: async (method: string, params: Record<string, unknown>) => {
     calls.push({ method, params })
+    if (method === 'groups.log') return { events: log }
     return method === 'groups.send' ? { event: { event_id: 'e-sent' } } : {}
   },
   useConnection: Object.assign(() => undefined, { getState: () => ({ state: 'open' }) }),
@@ -29,6 +30,7 @@ vi.stubGlobal('localStorage', {
 
 const {
   deleteConversation,
+  fetchConversations,
   deletedConversations,
   draftConversation,
   openConversation,
@@ -38,6 +40,24 @@ const {
   undoDeleteConversation,
   useGroupLive,
 } = await import('./groups')
+
+// What Hermes answers a room's log with: a round in each of two conversations.
+const at = Math.floor(Date.now() / 1000) - 60
+let seq = 0
+const ev = (kind: string, payload: Record<string, unknown>) => ({
+  seq: ++seq,
+  event_id: `e${seq}`,
+  kind,
+  actor: { kind: 'user', id: 'you' },
+  payload,
+  created_at: at + seq,
+})
+const log = [
+  ev('message.user', { text: 'Plan the trip', thread_id: 'c-one' }),
+  ev('message.member', { text: 'On it', thread_id: 'c-one' }),
+  ev('message.user', { text: 'What’s for dinner?' }),
+  ev('message.member', { text: 'Pasta' }),
+]
 
 const ROOM = 'murmur-room-1'
 const sent = () =>
@@ -99,6 +119,23 @@ describe('a group’s conversations', () => {
     expect(live().names[thread]).toBe('Trip planning')
     renameConversation(ROOM, thread, '   ')
     expect(live().names[thread]).toBe('')
+  })
+
+  it('reads a room’s conversations out of its log, newest first, for the sidebar', async () => {
+    const rows = await fetchConversations(ROOM)
+    expect(rows.map((row) => row.id)).toEqual(['main', 'c-one'])
+    expect(rows.map((row) => row.title)).toEqual(['What’s for dinner?', 'Plan the trip'])
+    // Both have an agent's answer in them, and neither has been read here.
+    expect(rows.every((row) => row.unread)).toBe(true)
+  })
+
+  it('leaves deleted ones out of what the sidebar reads, and honours names', async () => {
+    renameConversation(ROOM, 'c-one', 'Trip')
+    deleteConversation(ROOM, 'main')
+    const rows = await fetchConversations(ROOM)
+    expect(rows.map((row) => row.title)).toEqual(['Trip'])
+    undoDeleteConversation(ROOM, 'main')
+    expect((await fetchConversations(ROOM)).map((row) => row.id)).toEqual(['main', 'c-one'])
   })
 
   it('remembers all of it between visits', () => {

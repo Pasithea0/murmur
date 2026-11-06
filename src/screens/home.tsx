@@ -288,6 +288,8 @@ export function Sidebar() {
   const [, chat] = useRoute('/chat/:agent/:chat?')
   const [, agentPage] = useRoute('/agent/:agent')
   const [, group] = useRoute('/group/:group')
+  // A conversation is one of its group's: the group's row stays the one that's selected.
+  const [, conversation] = useRoute('/group/:group/:thread')
   const [inSettings] = useRoute('/settings/:section?')
   const [inAgents] = useRoute('/agents')
   const actions = useAgentActions()
@@ -370,8 +372,11 @@ export function Sidebar() {
               />
               <Roster
                 density="compact"
-                selectedId={group ? `group:${group.group}` : (chat?.agent ?? agentPage?.agent)}
+                selectedId={
+                  group ? `group:${group.group}` : conversation ? `group:${conversation.group}` : (chat?.agent ?? agentPage?.agent)
+                }
                 openChatId={chat?.chat}
+                openThreadId={conversation?.thread}
                 onEdit={actions.edit}
                 onDelete={actions.remove}
                 onRenameGroup={actions.renameGroup}

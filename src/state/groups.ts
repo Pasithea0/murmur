@@ -87,6 +87,8 @@ export type GroupSummary = {
   lastActivityAt: number
   /** A round is running. */
   live: boolean
+  /** The conversation a round is running in, if one is. */
+  liveThread?: string
   /** "Atlas: Sounds good" / "You: …" — empty for a brand-new group. */
   lastLine: string
   /** Someone said something since you last looked. */
@@ -399,11 +401,13 @@ export function deleteConversation(id: string, thread: string) {
   writes(THREADS_KEY, id, storedThreads(id).filter((t) => t !== thread))
   patch(id, (l) => ({ threads: l.threads.filter((t) => t !== thread) }))
   if (openThread(id) === thread) openConversation(id, MAIN_THREAD)
+  rereadConversations(id)
 }
 
 /** Bring a deleted conversation back to the list, exactly as it was. */
 export function undoDeleteConversation(id: string, thread: string) {
   writes(HIDDEN_KEY, id, deletedConversations(id).filter((t) => t !== thread))
+  rereadConversations(id)
 }
 
 /** Give a conversation a name of your own. Hermes has none for it; this is this device's. */
@@ -414,6 +418,7 @@ export function renameConversation(id: string, thread: string, title: string) {
   else delete names[thread]
   writeSlice(NAMES_KEY, id, names)
   patch(id, (l) => ({ names: { ...l.names, ...(name ? { [thread]: name } : { [thread]: '' }) } }))
+  rereadConversations(id)
 }
 
 /** Reading a conversation counts as reading it: it stops showing a dot. */
@@ -425,20 +430,70 @@ export function markConversationSeen(id: string, thread: string, seq: number) {
 
 /** A room's conversations as its page lists them, from what this device has filed. */
 function rowsOf(id: string, live: Live | undefined): ConversationRow[] {
-  const log = live?.conversations ?? []
-  const known = live?.threads ?? []
-  const rows = conversationRows(log, {
-    known,
+  return conversationRows(live?.conversations ?? [], {
+    known: live?.threads ?? [],
     open: live?.thread ?? storedThread(id),
     deleted: deletedConversations(id),
     names: namesOf(id),
     seen: seenIn(id),
     events: live?.events ?? [],
   })
-  // A conversation being started is on screen before it exists: it becomes one —
-  // and joins this list — when the first word is said in it.
-  const real = new Set([...known, ...log.map((c) => c.id)])
-  return rows.filter((row) => real.has(row.id))
+}
+
+// ── A group's conversations, from its log ───────────────────────────────────
+// The sidebar lists a group's recent conversations the way it lists an agent's
+// chats, and its rows want a title and a time rather than a live view. So this
+// reads the room's log itself, a couple of hundred events back, under its own
+// query — refreshed when the room moves and whenever this device files one.
+
+/** How far back a list's look at a room reaches. */
+const CONVERSATIONS = 200
+
+/** A room's conversations as a list shows them, read straight from its log. */
+export async function fetchConversations(id: string): Promise<ConversationRow[]> {
+  const latest = qc?.getQueryData<WireRoom[]>(LIST)?.find((r) => r.room_id === id)?.latest_seq ?? 0
+  const res = await rpc<LogResult>('groups.log', {
+    room_id: id,
+    since_seq: Math.max(0, latest - CONVERSATIONS),
+    limit: 500,
+  }).catch(() => ({ events: [] as RoomEvent[] }))
+  const events = res.events ?? []
+  return conversationRows(conversationsIn(events), {
+    known: storedThreads(id),
+    open: storedThread(id),
+    deleted: deletedConversations(id),
+    names: namesOf(id),
+    seen: seenIn(id),
+    events,
+  })
+}
+
+export const groupChatsKey = (id: string) => ['group-chats', id] as const
+
+/** A room's conversations, for the sidebar. Nothing is read without an id. */
+export function useGroupChats(id: string | undefined) {
+  return useQuery({
+    queryKey: groupChatsKey(id ?? ''),
+    enabled: Boolean(id),
+    queryFn: () => fetchConversations(id!),
+    staleTime: 10_000,
+  })
+}
+
+/** Load a group's conversations before its row unfolds, so the list is ready. */
+export function prefetchGroupChats(id: string) {
+  void qc?.prefetchQuery({ queryKey: groupChatsKey(id), queryFn: () => fetchConversations(id), staleTime: 10_000 })
+}
+
+/** Does the sidebar list this conversation under its group (so the group's own row needn't be highlighted)? */
+export function useShowsConversation(groupId: string, open: boolean, threadId: string | undefined) {
+  const { data } = useGroupChats(open && threadId ? groupId : undefined)
+  return !!threadId && !!data && data.some((row) => row.id === threadId)
+}
+
+/** What this device filed about a room has moved: read its log again. */
+function rereadConversations(id: string) {
+  void qc?.invalidateQueries({ queryKey: groupChatsKey(id) })
 }
 
 /** Forget everything this device kept about a room's conversations. */
@@ -647,6 +702,7 @@ function poll(id: string): Promise<void> {
       if (wasWorking && !now?.driver?.working) fastUntil.set(id, Date.now() + 1500)
       if (events.length || wasWorking !== Boolean(now?.driver?.working)) {
         void qc?.invalidateQueries({ queryKey: SUMMARIES })
+        rereadConversations(id)
       }
     } catch (e) {
       const code = (e as { code?: number }).code
@@ -974,7 +1030,10 @@ function wire() {
   gateway.onEvent((ev) => {
     if (ev.type !== 'sessions.changed') return
     clearTimeout(summaryTimer)
-    summaryTimer = setTimeout(() => qc?.invalidateQueries({ queryKey: SUMMARIES }), 700)
+    summaryTimer = setTimeout(() => {
+      void qc?.invalidateQueries({ queryKey: SUMMARIES })
+      void qc?.invalidateQueries({ queryKey: ['group-chats'] })
+    }, 700)
   })
   // A new connection has no attachments; listen in again and catch up.
   // Words written while we were away are lost to the stream, so half-heard
@@ -1625,6 +1684,7 @@ function summarize(room: WireRoom, events: RoomEvent[], agents: Agent[] | undefi
     memberHues: group.members.map((m) => m.hue),
     lastActivityAt: Math.max(group.updatedAt, (events.at(-1)?.created_at ?? 0) * 1000),
     live: working ?? liveFromLog(events),
+    liveThread: activeThread(events),
     lastLine: lastLine(events, group.members),
     unread: Boolean(lastMember && lastMember.seq > (seen ?? 0) && !watchers.has(room.room_id)),
   }
