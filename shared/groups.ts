@@ -131,6 +131,54 @@ export function mergeConversations(fromLog: Conversation[], known: string[], ope
   return [...rest, ...fromLog]
 }
 
+export type ConversationRow = Conversation & {
+  /** What a device calls it: its own name for it, else the first line asked. */
+  title: string
+  /** An agent said something in it since that device last looked. */
+  unread: boolean
+}
+
+/**
+ * A room's conversations as a list shows them: newest first, the ones this
+ * device deleted left out, each named and marked read as that device has it.
+ */
+export function conversationRows(
+  fromLog: Conversation[],
+  {
+    known = [],
+    open,
+    deleted = [],
+    names = {},
+    seen = {},
+    events = [],
+  }: {
+    /** Ids a device remembers that the log no longer shows. */
+    known?: string[]
+    /** The conversation that device is showing. */
+    open?: string
+    /** Conversations that device has deleted. */
+    deleted?: string[]
+    /** Names that device gave them. */
+    names?: Record<string, string>
+    /** How far into each that device has read. */
+    seen?: Record<string, number>
+    /** The room's log, for unread marks. */
+    events?: RoomEvent[]
+  } = {},
+): ConversationRow[] {
+  const gone = new Set(deleted)
+  return mergeConversations(fromLog, known, open ?? '')
+    .filter((conversation) => !gone.has(conversation.id))
+    .map((conversation) => {
+      const last = events.findLast((e) => e.kind === 'message.member' && threadOf(e) === conversation.id)?.seq ?? 0
+      return {
+        ...conversation,
+        title: names[conversation.id] || conversation.title,
+        unread: last > (seen[conversation.id] ?? 0),
+      }
+    })
+}
+
 /**
  * The conversation the room is working in right now, if a round is running
  * there: the newest thing you said whose thread hasn't been wrapped up since.

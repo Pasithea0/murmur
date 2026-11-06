@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
-import { ChevronLeft, Ellipsis } from 'lucide-react'
+import { ChevronLeft, Ellipsis, SquarePen } from 'lucide-react'
 import { Link } from 'wouter'
 import { IconButton } from '@/ui/button'
 import type { BuddyState } from '@/ui/buddy'
@@ -20,9 +20,13 @@ type Props = {
   listening: string[]
   mentioned: string[]
   showBack: boolean
+  /** Where back goes: the group's conversations. */
+  back: { href: string; label: string }
   /** Messages are scrolled beneath it: frost it and draw the edge. */
   scrolled: boolean
   onOpen: () => void
+  /** Start another conversation in the group. */
+  onNew: () => void
 }
 
 const ORB_STATE: Record<GroupActivity['phase'], BuddyState> = {
@@ -71,8 +75,10 @@ export function GroupHeader({
   listening,
   mentioned,
   showBack,
+  back,
   scrolled,
   onOpen,
+  onNew,
 }: Props) {
   const subtitle = subtitleFor(group, active, working, mentioned, stopping)
   const live = Boolean(active) || (working && !stopping)
@@ -104,8 +110,8 @@ export function GroupHeader({
         <WindowControlsGap side="start" column={736} flexGap={4} />
         {showBack && (
           <Link
-            href="/"
-            aria-label="All agents"
+            href={back.href}
+            aria-label={back.label}
             className="pressable relative z-10 -mr-2.5 flex size-11 flex-none items-center rounded-full pl-1.5 text-accent hover:bg-fill-1"
           >
             <ChevronLeft size={26} strokeWidth={2} aria-hidden />
@@ -166,6 +172,10 @@ export function GroupHeader({
         <span aria-hidden className="hidden flex-1 desktop:block" />
         <IconButton size="lg" label="Group info" onClick={onOpen} disabled={!group}>
           <Ellipsis size={20} strokeWidth={2.25} aria-hidden />
+        </IconButton>
+        {/* Another conversation in the same group, as an agent's chat does. */}
+        <IconButton size="lg" label="New conversation" onClick={onNew} disabled={!group}>
+          <SquarePen size={20} strokeWidth={1.85} aria-hidden />
         </IconButton>
         <WindowControlsGap side="end" column={736} flexGap={4} />
       </div>

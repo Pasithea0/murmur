@@ -41,6 +41,7 @@ import { ShareSheet } from '@/features/share/share-sheet'
 
 // Screens most visits never open load on the side, so the first open is quick.
 const GroupScreen = lazyComponent(() => import('@/screens/group').then((m) => m.GroupScreen))
+const GroupChatsScreen = lazyComponent(() => import('@/screens/group-chats').then((m) => m.GroupChatsScreen))
 const SettingsScreen = lazyComponent(() => import('@/screens/settings').then((m) => m.SettingsScreen))
 const OnboardingScreen = lazyComponent(() => import('@/screens/onboarding').then((m) => m.OnboardingScreen))
 const AgentScreen = lazyComponent(() => import('@/screens/agent').then((m) => m.AgentScreen))
@@ -110,7 +111,14 @@ export function App() {
                     <Route path="/group/:group">
                       {(p) => (
                         <Pushed>
-                          <GroupScreen groupId={p.group} />
+                          <GroupChatsScreen groupId={p.group} />
+                        </Pushed>
+                      )}
+                    </Route>
+                    <Route path="/group/:group/:thread">
+                      {(p) => (
+                        <Pushed>
+                          <GroupScreen groupId={p.group} thread={p.thread} />
                         </Pushed>
                       )}
                     </Route>

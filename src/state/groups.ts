@@ -18,17 +18,18 @@ import type { ApprovalChoice, ChatItem, Speaker } from '@/features/chat/types'
 import { mentionedIds, toHandles, toNames } from '@shared/mentions.ts'
 import {
   activeThread,
+  conversationRows,
   conversationsIn,
   joinNames,
   lastLine,
   liveFromLog,
   MAIN_THREAD,
   memberOf,
-  mergeConversations,
   TERMINAL,
   threadOf,
   visibleText,
   type Conversation,
+  type ConversationRow,
   type RoomEvent,
 } from '@shared/groups.ts'
 import { scoped } from '@/hermes/instance'
@@ -283,13 +284,18 @@ function markSeen(id: string, seq: number) {
   }
 }
 
-// ── Conversations a device knows about ──────────────────────────────────────
+// ── Conversations a device files ────────────────────────────────────────────
 // Hermes's log is where a room's conversations really live, but it is read a
-// few hundred events at a time: a conversation whose last word has scrolled out
-// of that window would vanish from the list. So the ids are also kept here.
+// few hundred events at a time, and Hermes has no notion of deleting one: a
+// conversation whose last word has scrolled out of that window would vanish
+// from the list, and one you're done with could never leave it. So what this
+// device knows, has deleted, and calls things by is kept here.
 
 const THREADS_KEY = scoped('murmur:group-conversations')
 const OPEN_KEY = scoped('murmur:group-thread')
+const HIDDEN_KEY = scoped('murmur:group-deleted')
+const NAMES_KEY = scoped('murmur:group-names')
+const CONVERSATION_SEEN_KEY = scoped('murmur:group-conversation-seen')
 
 function readMap<T>(key: string): Record<string, T> {
   try {
@@ -308,6 +314,22 @@ function writeMap<T>(key: string, value: Record<string, T>) {
   }
 }
 
+/** One room's slice of a per-room map, written back with the others left alone. */
+function writeSlice<T>(key: string, id: string, value: T) {
+  writeMap(key, { ...readMap<T>(key), [id]: value })
+}
+
+function dropSlice(key: string, id: string) {
+  const all = { ...readMap<unknown>(key) }
+  delete all[id]
+  writeMap(key, all)
+}
+
+function writes<T>(key: string, id: string, value: T[]): T[] {
+  writeSlice(key, id, value)
+  return value
+}
+
 function storedThreads(id: string): string[] {
   const ids = readMap<string[]>(THREADS_KEY)[id]
   return Array.isArray(ids) ? ids.filter((t) => typeof t === 'string' && t) : []
@@ -318,52 +340,110 @@ function storedThread(id: string): string {
   return typeof thread === 'string' && thread ? thread : MAIN_THREAD
 }
 
+/** Conversations deleted on this device: hidden from its list, kept by Hermes. */
+export function deletedConversations(id: string): string[] {
+  const ids = readMap<string[]>(HIDDEN_KEY)[id]
+  return Array.isArray(ids) ? ids.filter((t) => typeof t === 'string' && t) : []
+}
+
+/** Names you gave a room's conversations, by id. */
+function namesOf(id: string): Record<string, string> {
+  const names = readMap<Record<string, string>>(NAMES_KEY)[id]
+  return names && typeof names === 'object' ? names : {}
+}
+
+/** How far into each of a room's conversations you've read, by id. */
+function seenIn(id: string): Record<string, number> {
+  const seen = readMap<Record<string, number>>(CONVERSATION_SEEN_KEY)[id]
+  return seen && typeof seen === 'object' ? seen : {}
+}
+
 /** The conversation a room is showing: the one last opened here, or its main one. */
 export function openThread(id: string): string {
   return get(id)?.thread ?? storedThread(id)
 }
 
-/** Every conversation a room is known to have: the log's, then any started before it. */
-export function groupConversations(id: string): Conversation[] {
-  const live = get(id)
-  return mergeConversations(live?.conversations ?? [], live?.threads ?? [], live?.thread ?? storedThread(id))
-}
-
 function rememberThread(id: string, thread: string) {
   const known = storedThreads(id)
   if (known.includes(thread)) return
-  writeMap(THREADS_KEY, { ...readMap<string[]>(THREADS_KEY), [id]: [...known, thread].slice(-100) })
+  writes(THREADS_KEY, id, [...known, thread].slice(-100))
   patch(id, (l) => ({ threads: l.threads.includes(thread) ? l.threads : [...l.threads, thread] }))
 }
 
 /** Show one of a room's conversations. */
 export function openConversation(id: string, thread: string) {
-  writeMap(OPEN_KEY, { ...readMap<string>(OPEN_KEY), [id]: thread })
+  writeSlice(OPEN_KEY, id, thread)
   if (!get(id)) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank(id) } }))
   patch(id, () => ({ thread }))
 }
 
 /**
- * Start a conversation in a room, without touching who's in it: Hermes runs a
- * new "thread" for it, with its own transcript and its own read watermarks, and
- * every member answers in it as usual. Returns its id.
+ * A conversation's id, before it is one: Hermes reads a thread into being with
+ * the first message said in it, so a new conversation has no id to file until
+ * then. Ids are a letter, a dash and base-36 — what Hermes takes as an
+ * identifier (letters, digits, `._:@/-`), and never Murmur's own `main`.
  */
-export function newConversation(id: string): string {
-  const thread = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-  if (!get(id)) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank(id) } }))
-  rememberThread(id, thread)
-  openConversation(id, thread)
-  return thread
+export function draftConversation(): string {
+  return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+}
+
+/**
+ * Delete a conversation here: Hermes keeps the room's messages (there is no way
+ * to take one thread out of its log), so this hides it from this device's list,
+ * where it can be brought back from the Hidden row.
+ */
+export function deleteConversation(id: string, thread: string) {
+  const gone = deletedConversations(id)
+  if (!gone.includes(thread)) writes(HIDDEN_KEY, id, [...gone, thread].slice(-200))
+  // A draft that never got a word in is only this device's: nothing to hide.
+  writes(THREADS_KEY, id, storedThreads(id).filter((t) => t !== thread))
+  patch(id, (l) => ({ threads: l.threads.filter((t) => t !== thread) }))
+  if (openThread(id) === thread) openConversation(id, MAIN_THREAD)
+}
+
+/** Bring a deleted conversation back to the list, exactly as it was. */
+export function undoDeleteConversation(id: string, thread: string) {
+  writes(HIDDEN_KEY, id, deletedConversations(id).filter((t) => t !== thread))
+}
+
+/** Give a conversation a name of your own. Hermes has none for it; this is this device's. */
+export function renameConversation(id: string, thread: string, title: string) {
+  const name = title.trim().replace(/\s+/g, ' ').slice(0, 100)
+  const names = namesOf(id)
+  if (name) names[thread] = name
+  else delete names[thread]
+  writeSlice(NAMES_KEY, id, names)
+  patch(id, (l) => ({ names: { ...l.names, ...(name ? { [thread]: name } : { [thread]: '' }) } }))
+}
+
+/** Reading a conversation counts as reading it: it stops showing a dot. */
+export function markConversationSeen(id: string, thread: string, seq: number) {
+  const seen = seenIn(id)
+  if ((seen[thread] ?? -1) >= seq) return
+  writeSlice(CONVERSATION_SEEN_KEY, id, { ...seen, [thread]: seq })
+}
+
+/** A room's conversations as its page lists them, from what this device has filed. */
+function rowsOf(id: string, live: Live | undefined): ConversationRow[] {
+  const log = live?.conversations ?? []
+  const known = live?.threads ?? []
+  const rows = conversationRows(log, {
+    known,
+    open: live?.thread ?? storedThread(id),
+    deleted: deletedConversations(id),
+    names: namesOf(id),
+    seen: seenIn(id),
+    events: live?.events ?? [],
+  })
+  // A conversation being started is on screen before it exists: it becomes one —
+  // and joins this list — when the first word is said in it.
+  const real = new Set([...known, ...log.map((c) => c.id)])
+  return rows.filter((row) => real.has(row.id))
 }
 
 /** Forget everything this device kept about a room's conversations. */
 function forgetConversations(id: string) {
-  const threads = { ...readMap<string[]>(THREADS_KEY) }
-  const open = { ...readMap<string>(OPEN_KEY) }
-  delete threads[id]
-  delete open[id]
-  writeMap(THREADS_KEY, threads)
-  writeMap(OPEN_KEY, open)
+  for (const key of [THREADS_KEY, OPEN_KEY, HIDDEN_KEY, NAMES_KEY, CONVERSATION_SEEN_KEY]) dropSlice(key, id)
 }
 
 // ── Live state ──────────────────────────────────────────────────────────────
@@ -420,6 +500,8 @@ type Live = {
   thread: string
   /** Conversation ids this device knows about (a new one has nothing in the log yet). */
   threads: string[]
+  /** Names this device gave them, by id. */
+  names: Record<string, string>
   events: RoomEvent[]
   cursor: number
   loaded: boolean
@@ -442,6 +524,7 @@ const blank = (id: string): Live => ({
   conversations: [],
   thread: storedThread(id),
   threads: storedThreads(id),
+  names: namesOf(id),
   events: [],
   cursor: 0,
   loaded: false,
@@ -925,18 +1008,26 @@ function displayName(m: WireMember) {
   return toMember(m, agents).name
 }
 
-/** Say something to the group's open conversation. "@Name" asks just them. */
-export async function sendToGroup(id: string, text: string) {
+/**
+ * Say something to a conversation. "@Name" asks just them. A conversation being
+ * started (`/group/:id/new`) says which one it is: saying the first word in it
+ * is what makes it real — filed here, and shown by the room from then on.
+ */
+export async function sendToGroup(id: string, text: string, thread?: string) {
   const body = text.trim()
   if (!body) return
-  const thread = openThread(id)
+  const into = thread ?? openThread(id)
+  if (thread) {
+    rememberThread(id, thread)
+    openConversation(id, thread)
+  }
   const eventId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
   const out: Outgoing = {
     id: `out-${eventId}`,
     eventId,
     text: body,
     wire: toHandles(body, wireMembers(id)),
-    thread,
+    thread: into,
     at: Date.now(),
   }
   patch(id, (l) => ({ outgoing: [...l.outgoing, out], stopping: undefined }))
@@ -1354,10 +1445,6 @@ export type GroupView = {
   stopping: boolean
   /** The conversation on screen. */
   thread: string
-  /** Every conversation this group has, newest first. */
-  conversations: Conversation[]
-  /** The conversation the group is working in right now, if a round is running. */
-  running?: string
 }
 
 const QUIET: View = { items: [], working: false, stopping: false }
@@ -1368,9 +1455,13 @@ const NO_APPROVALS: Approval[] = []
  * One group, live, as one of its conversations. Polls while mounted; streams
  * replies when it can.
  */
-export function useGroup(id: string): GroupView {
+export function useGroup(id: string, thread?: string): GroupView {
   bind(useQueryClient())
   useEffect(() => watch(id), [id])
+  // Follow the address: the conversation it names is the one on screen.
+  useEffect(() => {
+    if (thread) openConversation(id, thread)
+  }, [id, thread])
   const live = useGroupLive((s) => s.rooms[id])
   const people = useAgents()
   const agents = people.data
@@ -1387,15 +1478,19 @@ export function useGroup(id: string): GroupView {
   // member's turn, a permission request — so only the open conversation is
   // shown, and only the work being done in it. Another conversation's round,
   // running at the same time, stays there until you open it.
-  const thread = live?.thread ?? MAIN_THREAD
+  const open = thread ?? live?.thread ?? MAIN_THREAD
   const all = live?.events ?? NONE
   const running = useMemo(() => activeThread(all), [all])
-  const here = !running || running === thread
-  const events = useMemo(() => all.filter((e) => threadOf(e) === thread), [all, thread])
-  const conversations = useMemo(
-    () => mergeConversations(live?.conversations ?? [], live?.threads ?? [], thread),
-    [live?.conversations, live?.threads, thread],
-  )
+  const here = !running || running === open
+  const events = useMemo(() => all.filter((e) => threadOf(e) === open), [all, open])
+
+  // Reading a conversation is reading it: it stops showing a dot in the list.
+  const cursor = live?.cursor ?? 0
+  const read = Boolean(live?.loaded)
+  useEffect(() => {
+    if (!read || typeof document === 'undefined' || document.visibilityState !== 'visible') return
+    markConversationSeen(id, open, cursor)
+  }, [id, open, read, cursor])
 
   // Streamed words change `streams` alone; everything the log says is worked
   // out again only when the log (or a permission request) moves.
@@ -1418,12 +1513,12 @@ export function useGroup(id: string): GroupView {
         ? {
             ...live,
             events,
-            outgoing: live.outgoing.filter((o) => o.thread === thread),
+            outgoing: live.outgoing.filter((o) => o.thread === open),
             approvals: here ? live.approvals : NO_APPROVALS,
             stopping: here ? live.stopping : undefined,
           }
         : undefined,
-    [live, events, thread, here],
+    [live, events, open, here],
   )
   const view = useMemo(() => (scoped ? present(scoped, cast, streams, history) : QUIET), [scoped, cast, streams, history])
   const kept = useRef<ChatItem[]>([])
@@ -1439,8 +1534,64 @@ export function useGroup(id: string): GroupView {
     working: here && view.working,
     stopping: here && view.stopping,
     active: here ? view.active : undefined,
-    thread,
-    conversations,
+    thread: open,
+  }
+}
+
+/** One group's conversations, as its page lists them. Polls while mounted. */
+export function useGroupPage(id: string): {
+  group?: Group
+  rows: ConversationRow[]
+  /** Conversations deleted on this device, newest first, for the Hidden row. */
+  deleted: ConversationRow[]
+  loaded: boolean
+  missing: boolean
+  /** The conversation the group is working in right now, if a round is running. */
+  running?: string
+} {
+  bind(useQueryClient())
+  useEffect(() => watch(id), [id])
+  const live = useGroupLive((s) => s.rooms[id])
+  const people = useAgents()
+  const agents = people.data
+  const listed = useQuery({ queryKey: LIST, queryFn: fetchRooms, staleTime: 5_000 }).data?.find((r) => r.room_id === id)
+  const room = live?.room ?? listed
+  const ready = Boolean(agents) || people.isError
+
+  const group = useMemo(() => (room && ready ? toGroup(room, agents) : undefined), [room, agents, ready])
+  const all = live?.events ?? NONE
+  const running = useMemo(() => activeThread(all), [all])
+  // Everything that decides the list is here: the log's own conversations, the
+  // ones this device remembers, and its names for them.
+  const versions = `${live?.thread}:${live?.threads.join()}:${Object.entries(live?.names ?? {})
+    .map(([t, n]) => `${t}=${n}`)
+    .join()}`
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const rows = useMemo(() => rowsOf(id, live), [id, live?.events, live?.conversations, live?.threads, versions])
+  const deleted = useMemo(() => {
+    const known = new Map((live?.conversations ?? []).map((c) => [c.id, c]))
+    return deletedConversations(id)
+      .map((thread) => {
+        const found = known.get(thread)
+        return {
+          id: thread,
+          title: live?.names[thread] || found?.title || '',
+          firstAt: found?.firstAt ?? 0,
+          lastAt: found?.lastAt ?? 0,
+          messages: found?.messages ?? 0,
+          unread: false,
+        }
+      })
+      .sort((a, b) => b.lastAt - a.lastAt)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, live?.conversations, versions])
+
+  return {
+    group,
+    rows,
+    deleted,
+    loaded: ready && (Boolean(live?.loaded) || (listed?.latest_seq === 0 && !live?.outgoing.length)),
+    missing: Boolean(live?.missing),
     running,
   }
 }

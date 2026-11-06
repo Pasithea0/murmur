@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 
-// A group holds as many conversations as you like. This is the store's side of
-// it: which one a room shows, and which one what you say goes to.
+// A group holds as many conversations as you like, and this device files them:
+// which one a room shows, what you call it, which you've read, and which you're
+// done with. (What the list then draws is shared/groups.test.ts.)
 
 const calls: { method: string; params: Record<string, unknown> }[] = []
 vi.mock('@/hermes/rest', () => ({ api: { get: async () => ({ profiles: [] }) }, HermesError: class extends Error {} }))
@@ -26,48 +27,81 @@ vi.stubGlobal('localStorage', {
   removeItem: (key: string) => void kept.delete(key),
 })
 
-const { groupConversations, newConversation, openConversation, openThread, sendToGroup, useGroupLive } = await import(
-  './groups'
-)
+const {
+  deleteConversation,
+  deletedConversations,
+  draftConversation,
+  openConversation,
+  openThread,
+  renameConversation,
+  sendToGroup,
+  undoDeleteConversation,
+  useGroupLive,
+} = await import('./groups')
 
 const ROOM = 'murmur-room-1'
-const said = () => calls.filter((c) => c.method === 'groups.send').at(-1)!.params.payload as { thread_id: string; text: string }
+const sent = () =>
+  calls.filter((c) => c.method === 'groups.send').at(-1)!.params.payload as { thread_id: string; text: string }
+const live = () => useGroupLive.getState().rooms[ROOM]
 
 describe('a group’s conversations', () => {
   it('starts a room on its main one', () => {
     expect(openThread('murmur-untouched')).toBe('main')
   })
 
-  it('starts a new one without touching the group, and shows it', () => {
-    const thread = newConversation(ROOM)
+  it('gives a conversation being started an id Hermes takes, and files nothing yet', () => {
+    const thread = draftConversation()
     expect(thread).not.toBe('main')
-    expect(openThread(ROOM)).toBe(thread)
     // Hermes reads a thread id off the wire as an identifier: letters, digits, a few safe marks.
     expect(thread).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/)
-    expect(groupConversations(ROOM).map((c) => c.id)).toEqual([thread])
+    // Nothing has been said in it, so the room knows nothing of it.
+    expect(live()).toBeUndefined()
   })
 
-  it('sends what you say to the conversation you are in', async () => {
-    const thread = openThread(ROOM)
-    await sendToGroup(ROOM, 'Plan the trip')
-    expect(said()).toMatchObject({ thread_id: thread, text: 'Plan the trip' })
-    // And it waits on screen in that conversation, not the others.
-    expect(useGroupLive.getState().rooms[ROOM].outgoing.at(-1)).toMatchObject({ thread, text: 'Plan the trip' })
+  it('files the conversation the first word is said in, and opens it', async () => {
+    const thread = draftConversation()
+    await sendToGroup(ROOM, 'Plan the trip', thread)
+    expect(sent()).toMatchObject({ thread_id: thread, text: 'Plan the trip' })
+    expect(openThread(ROOM)).toBe(thread)
+    expect(live().threads).toContain(thread)
+    // And it waits on screen in that conversation.
+    expect(live().outgoing.at(-1)).toMatchObject({ thread, text: 'Plan the trip' })
   })
 
-  it('keeps the older ones, and says in the one you go back to', async () => {
+  it('keeps the others, and says in the one you go back to', async () => {
     openConversation(ROOM, 'main')
-    expect(openThread(ROOM)).toBe('main')
-    await sendToGroup(ROOM, 'And what’s for dinner?')
-    expect(said()).toMatchObject({ thread_id: 'main' })
-    expect(useGroupLive.getState().rooms[ROOM].outgoing.at(-1)).toMatchObject({ thread: 'main' })
-    expect(groupConversations(ROOM)).toHaveLength(2)
+    await sendToGroup(ROOM, 'And dinner?')
+    expect(sent()).toMatchObject({ thread_id: 'main' })
+    expect(live().outgoing.at(-1)).toMatchObject({ thread: 'main' })
+    expect(live().threads).toHaveLength(1)
   })
 
-  it('remembers which conversation a room shows, and which it has', () => {
-    // A fresh visit to the store: what's on disk decides.
-    expect(openThread('murmur-untouched')).toBe('main')
-    const stored = [...kept.values()].join()
-    expect(stored).toContain(ROOM)
+  it('deletes a conversation here, and brings it back', () => {
+    const thread = live().threads[0]
+    deleteConversation(ROOM, thread)
+    expect(deletedConversations(ROOM)).toEqual([thread])
+    expect(live().threads).not.toContain(thread)
+    undoDeleteConversation(ROOM, thread)
+    expect(deletedConversations(ROOM)).toEqual([])
+  })
+
+  it('goes back to the main conversation when the one on screen is deleted', () => {
+    const thread = draftConversation()
+    openConversation(ROOM, thread)
+    expect(openThread(ROOM)).toBe(thread)
+    deleteConversation(ROOM, thread)
+    expect(openThread(ROOM)).toBe('main')
+  })
+
+  it('names a conversation, and hands it back to what was first asked', () => {
+    const thread = live().threads[0]
+    renameConversation(ROOM, thread, '  Trip  planning ')
+    expect(live().names[thread]).toBe('Trip planning')
+    renameConversation(ROOM, thread, '   ')
+    expect(live().names[thread]).toBe('')
+  })
+
+  it('remembers all of it between visits', () => {
+    expect([...kept.values()].join()).toContain(ROOM)
   })
 })
