@@ -66,3 +66,85 @@ export function lastLine(events: RoomEvent[], roster: Mentionable[]) {
   const who = said.kind === 'message.user' ? 'You' : (roster.find((m) => m.id === memberOf(said))?.name ?? 'Someone')
   return `${who}: ${plain(toNames(String(said.payload.text ?? ''), roster))}`.slice(0, 140)
 }
+
+// ── Conversations ───────────────────────────────────────────────────────────
+// Hermes runs one room, and any number of conversations inside it ("threads" in
+// its words): every event carries the thread it belongs to, the room keeps a
+// read watermark and a slice of the transcript per thread and member, and a
+// message that opens a new thread starts a fresh discussion with the same
+// members. Murmur shows a group's threads as its conversations.
+
+/** Murmur's own conversation: the thread its rooms are made with, unless a newer one is started. */
+export const MAIN_THREAD = 'main'
+/** Hermes's sentinel for room messages that predate threading. */
+const LEGACY_THREAD = 'legacy'
+
+/** The conversation an event belongs to. Untagged and legacy messages read as the main one. */
+export function threadOf(event: { payload?: Record<string, unknown> }): string {
+  const value = event.payload?.thread_id
+  return typeof value === 'string' && value && value !== LEGACY_THREAD ? value : MAIN_THREAD
+}
+
+export type Conversation = {
+  id: string
+  /** The first thing asked in it, as one line of words; empty until you say something. */
+  title: string
+  /** When it opened and when it was last added to, in ms. */
+  firstAt: number
+  lastAt: number
+  /** How much has been said in it, by you and the agents. */
+  messages: number
+}
+
+/** Every conversation a room's log holds, most recently spoken in first. */
+export function conversationsIn(events: RoomEvent[]): Conversation[] {
+  const found = new Map<string, Conversation>()
+  for (const event of events) {
+    const id = threadOf(event)
+    const at = event.created_at * 1000
+    let conversation = found.get(id)
+    if (!conversation) found.set(id, (conversation = { id, title: '', firstAt: at, lastAt: at, messages: 0 }))
+    conversation.lastAt = Math.max(conversation.lastAt, at)
+    if (event.kind === 'message.member' ? visibleText(String(event.payload.text ?? '')) : event.kind === 'message.user') {
+      conversation.messages++
+    }
+    if (!conversation.title && event.kind === 'message.user') {
+      conversation.title = plain(String(event.payload.text ?? '')).slice(0, 140)
+    }
+  }
+  return [...found.values()].sort((a, b) => b.lastAt - a.lastAt)
+}
+
+/**
+ * The log's conversations, plus any a device knows about that the log no longer
+ * shows (a long conversation scrolls out of the window it is read through).
+ * Ones with nothing in the log are new, and read from the top.
+ */
+export function mergeConversations(fromLog: Conversation[], known: string[], open: string): Conversation[] {
+  const seen = new Set(fromLog.map((c) => c.id))
+  const rest: Conversation[] = []
+  for (const thread of [...known, open]) {
+    if (!thread || seen.has(thread)) continue
+    seen.add(thread)
+    rest.push({ id: thread, title: '', firstAt: 0, lastAt: 0, messages: 0 })
+  }
+  return [...rest, ...fromLog]
+}
+
+/**
+ * The conversation the room is working in right now, if a round is running
+ * there: the newest thing you said whose thread hasn't been wrapped up since.
+ * A Stop or a disband speaks for the whole room, so nothing is running then.
+ */
+export function activeThread(events: RoomEvent[], now = Date.now()): string | undefined {
+  const last = events.at(-1)
+  if (!last || now - last.created_at * 1000 > 35 * 60_000) return undefined
+  const ended = new Set<string>()
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event.kind === 'room.stop_requested' || event.kind === 'room.disbanded') return undefined
+    if (TERMINAL.has(event.kind)) ended.add(threadOf(event))
+    else if (event.kind === 'message.user' && !ended.has(threadOf(event))) return threadOf(event)
+  }
+  return undefined
+}

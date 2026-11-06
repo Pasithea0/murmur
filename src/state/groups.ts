@@ -16,7 +16,21 @@ import { friendlyError, resumeHolding } from '@/state/chats'
 import { toolLabel } from '@/features/chat/tool-labels'
 import type { ApprovalChoice, ChatItem, Speaker } from '@/features/chat/types'
 import { mentionedIds, toHandles, toNames } from '@shared/mentions.ts'
-import { joinNames, lastLine, liveFromLog, memberOf, TERMINAL, visibleText, type RoomEvent } from '@shared/groups.ts'
+import {
+  activeThread,
+  conversationsIn,
+  joinNames,
+  lastLine,
+  liveFromLog,
+  MAIN_THREAD,
+  memberOf,
+  mergeConversations,
+  TERMINAL,
+  threadOf,
+  visibleText,
+  type Conversation,
+  type RoomEvent,
+} from '@shared/groups.ts'
 import { scoped } from '@/hermes/instance'
 import { isMissingMethod } from '@/hermes/compat'
 import { approvalText } from '@/features/chat/approval-text'
@@ -80,7 +94,6 @@ export type GroupSummary = {
 
 export const MIN_MEMBERS = 2
 export const MAX_MEMBERS = 6
-const THREAD = 'main'
 const HISTORY = 400
 const FAST = 800
 const SLOW = 5000
@@ -220,6 +233,7 @@ export async function deleteGroup(id: string) {
     get(id)?.room?.members ?? (qc?.getQueryData<WireRoom[]>(LIST) ?? []).find((r) => r.room_id === id)?.members ?? []
   await rpc('groups.disband', { room_id: id })
   stopWatching(id)
+  forgetConversations(id)
   useGroupLive.setState((s) => {
     const rooms = { ...s.rooms }
     delete rooms[id]
@@ -269,6 +283,89 @@ function markSeen(id: string, seq: number) {
   }
 }
 
+// ── Conversations a device knows about ──────────────────────────────────────
+// Hermes's log is where a room's conversations really live, but it is read a
+// few hundred events at a time: a conversation whose last word has scrolled out
+// of that window would vanish from the list. So the ids are also kept here.
+
+const THREADS_KEY = scoped('murmur:group-conversations')
+const OPEN_KEY = scoped('murmur:group-thread')
+
+function readMap<T>(key: string): Record<string, T> {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? '{}')
+    return value && typeof value === 'object' ? (value as Record<string, T>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeMap<T>(key: string, value: Record<string, T>) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // Private mode: nothing is remembered between visits.
+  }
+}
+
+function storedThreads(id: string): string[] {
+  const ids = readMap<string[]>(THREADS_KEY)[id]
+  return Array.isArray(ids) ? ids.filter((t) => typeof t === 'string' && t) : []
+}
+
+function storedThread(id: string): string {
+  const thread = readMap<string>(OPEN_KEY)[id]
+  return typeof thread === 'string' && thread ? thread : MAIN_THREAD
+}
+
+/** The conversation a room is showing: the one last opened here, or its main one. */
+export function openThread(id: string): string {
+  return get(id)?.thread ?? storedThread(id)
+}
+
+/** Every conversation a room is known to have: the log's, then any started before it. */
+export function groupConversations(id: string): Conversation[] {
+  const live = get(id)
+  return mergeConversations(live?.conversations ?? [], live?.threads ?? [], live?.thread ?? storedThread(id))
+}
+
+function rememberThread(id: string, thread: string) {
+  const known = storedThreads(id)
+  if (known.includes(thread)) return
+  writeMap(THREADS_KEY, { ...readMap<string[]>(THREADS_KEY), [id]: [...known, thread].slice(-100) })
+  patch(id, (l) => ({ threads: l.threads.includes(thread) ? l.threads : [...l.threads, thread] }))
+}
+
+/** Show one of a room's conversations. */
+export function openConversation(id: string, thread: string) {
+  writeMap(OPEN_KEY, { ...readMap<string>(OPEN_KEY), [id]: thread })
+  if (!get(id)) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank(id) } }))
+  patch(id, () => ({ thread }))
+}
+
+/**
+ * Start a conversation in a room, without touching who's in it: Hermes runs a
+ * new "thread" for it, with its own transcript and its own read watermarks, and
+ * every member answers in it as usual. Returns its id.
+ */
+export function newConversation(id: string): string {
+  const thread = `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+  if (!get(id)) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank(id) } }))
+  rememberThread(id, thread)
+  openConversation(id, thread)
+  return thread
+}
+
+/** Forget everything this device kept about a room's conversations. */
+function forgetConversations(id: string) {
+  const threads = { ...readMap<string[]>(THREADS_KEY) }
+  const open = { ...readMap<string>(OPEN_KEY) }
+  delete threads[id]
+  delete open[id]
+  writeMap(THREADS_KEY, threads)
+  writeMap(OPEN_KEY, open)
+}
+
 // ── Live state ──────────────────────────────────────────────────────────────
 
 type ToolItem = Extract<ChatItem, { kind: 'tool' }>
@@ -308,6 +405,8 @@ type Outgoing = {
   text: string
   /** As sent ("@atlas"), to recognise it in the log before Hermes confirms. */
   wire: string
+  /** The conversation it was said in. */
+  thread: string
   at: number
   stored?: string
   failed?: boolean
@@ -315,6 +414,12 @@ type Outgoing = {
 
 type Live = {
   room?: WireRoom
+  /** Every conversation in the room's log, newest first, as the log sees them. */
+  conversations: Conversation[]
+  /** The conversation on screen. */
+  thread: string
+  /** Conversation ids this device knows about (a new one has nothing in the log yet). */
+  threads: string[]
   events: RoomEvent[]
   cursor: number
   loaded: boolean
@@ -333,7 +438,10 @@ type Live = {
 
 export const useGroupLive = create<{ rooms: Record<string, Live> }>(() => ({ rooms: {} }))
 
-const blank = (): Live => ({
+const blank = (id: string): Live => ({
+  conversations: [],
+  thread: storedThread(id),
+  threads: storedThreads(id),
   events: [],
   cursor: 0,
   loaded: false,
@@ -370,7 +478,7 @@ const fastUntil = new Map<string, number>()
 
 function watch(id: string) {
   watchers.set(id, (watchers.get(id) ?? 0) + 1)
-  if (!get(id)) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank() } }))
+  if (!get(id)) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank(id) } }))
   void poll(id)
   return () => {
     const left = (watchers.get(id) ?? 1) - 1
@@ -386,7 +494,7 @@ function watch(id: string) {
 export function prefetchGroup(id: string) {
   const live = get(id)
   if (live?.loaded || polling.has(id)) return
-  if (!live) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank() } }))
+  if (!live) useGroupLive.setState((s) => ({ rooms: { ...s.rooms, [id]: blank(id) } }))
   void poll(id)
 }
 
@@ -545,6 +653,7 @@ function apply(id: string, state: StateResult, fresh: RoomEvent[], cursor: numbe
       room: state.room,
       driver,
       events,
+      conversations: conversationsIn(events),
       cursor: end,
       loaded: true,
       missing: false,
@@ -816,16 +925,18 @@ function displayName(m: WireMember) {
   return toMember(m, agents).name
 }
 
-/** Say something to the group. "@Name" asks just them. */
+/** Say something to the group's open conversation. "@Name" asks just them. */
 export async function sendToGroup(id: string, text: string) {
   const body = text.trim()
   if (!body) return
+  const thread = openThread(id)
   const eventId = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
   const out: Outgoing = {
     id: `out-${eventId}`,
     eventId,
     text: body,
     wire: toHandles(body, wireMembers(id)),
+    thread,
     at: Date.now(),
   }
   patch(id, (l) => ({ outgoing: [...l.outgoing, out], stopping: undefined }))
@@ -838,7 +949,7 @@ async function deliver(id: string, out: Outgoing) {
     const res = await rpc<{ event?: { event_id?: string } }>('groups.send', {
       room_id: id,
       event_id: out.eventId,
-      payload: { text: out.wire, thread_id: THREAD },
+      payload: { text: out.wire, thread_id: out.thread },
     })
     const stored = res.event?.event_id
     patch(id, (l) => {
@@ -1241,12 +1352,22 @@ export type GroupView = {
   active?: GroupActivity
   /** Stop was pressed and the round is winding down. */
   stopping: boolean
+  /** The conversation on screen. */
+  thread: string
+  /** Every conversation this group has, newest first. */
+  conversations: Conversation[]
+  /** The conversation the group is working in right now, if a round is running. */
+  running?: string
 }
 
 const QUIET: View = { items: [], working: false, stopping: false }
 const NONE: RoomEvent[] = []
+const NO_APPROVALS: Approval[] = []
 
-/** One group, live. Polls while mounted; streams replies when it can. */
+/**
+ * One group, live, as one of its conversations. Polls while mounted; streams
+ * replies when it can.
+ */
 export function useGroup(id: string): GroupView {
   bind(useQueryClient())
   useEffect(() => watch(id), [id])
@@ -1261,18 +1382,50 @@ export function useGroup(id: string): GroupView {
   const group = useMemo(() => (room && ready ? toGroup(room, agents) : undefined), [room, agents, ready])
   const cast = useMemo(() => castOf(group?.members ?? []), [group])
 
+  // A room holds any number of conversations. Everything the room does is
+  // tagged with the one it belongs to — the round a message starts, each
+  // member's turn, a permission request — so only the open conversation is
+  // shown, and only the work being done in it. Another conversation's round,
+  // running at the same time, stays there until you open it.
+  const thread = live?.thread ?? MAIN_THREAD
+  const all = live?.events ?? NONE
+  const running = useMemo(() => activeThread(all), [all])
+  const here = !running || running === thread
+  const events = useMemo(() => all.filter((e) => threadOf(e) === thread), [all, thread])
+  const conversations = useMemo(
+    () => mergeConversations(live?.conversations ?? [], live?.threads ?? [], thread),
+    [live?.conversations, live?.threads, thread],
+  )
+
   // Streamed words change `streams` alone; everything the log says is worked
   // out again only when the log (or a permission request) moves.
-  const events = live?.events ?? NONE
   const logged = useMemo(() => loggedReplies(events), [events])
-  const streams = useMemo(() => (live ? liveStreams(live.streams, logged) : []), [live?.streams, logged])
+  const streams = useMemo(() => (live && here ? liveStreams(live.streams, logged) : []), [live, logged, here])
   const speaking = [...new Set(streams.map((s) => s.member))].join()
   const { aliases, trail, approvals } = live ?? {}
   const history = useMemo(
-    () => (aliases && trail && approvals ? presentLog({ events, aliases, trail, approvals }, cast, speaking) : []),
-    [events, aliases, trail, approvals, cast, speaking],
+    () =>
+      aliases && trail && approvals
+        ? presentLog({ events, aliases, trail, approvals: here ? approvals : NO_APPROVALS }, cast, speaking)
+        : [],
+    [events, aliases, trail, approvals, here, cast, speaking],
   )
-  const view = useMemo(() => (live ? present(live, cast, streams, history) : QUIET), [live, cast, streams, history])
+  // This conversation's own: its history, plus anything of yours still on its
+  // way there.
+  const scoped = useMemo(
+    () =>
+      live
+        ? {
+            ...live,
+            events,
+            outgoing: live.outgoing.filter((o) => o.thread === thread),
+            approvals: here ? live.approvals : NO_APPROVALS,
+            stopping: here ? live.stopping : undefined,
+          }
+        : undefined,
+    [live, events, thread, here],
+  )
+  const view = useMemo(() => (scoped ? present(scoped, cast, streams, history) : QUIET), [scoped, cast, streams, history])
   const kept = useRef<ChatItem[]>([])
   const items = useMemo(() => (kept.current = keep(kept.current, view.items)), [view.items])
 
@@ -1282,9 +1435,13 @@ export function useGroup(id: string): GroupView {
     // A group the list says is brand new needs no wait to show its welcome.
     loaded: ready && (Boolean(live?.loaded) || (listed?.latest_seq === 0 && !live?.outgoing.length)),
     missing: Boolean(live?.missing),
-    working: view.working,
-    stopping: view.stopping,
-    active: view.active,
+    // News of another conversation: no Stop here, no face on this one's last turn.
+    working: here && view.working,
+    stopping: here && view.stopping,
+    active: here ? view.active : undefined,
+    thread,
+    conversations,
+    running,
   }
 }
 

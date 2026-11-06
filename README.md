@@ -122,7 +122,7 @@ On umbrelOS, your agents can work with the Umbrel itself: its apps, files and mo
   <img src="docs/readme/group-wide-light.png" alt="Atlas, Juniper and Basil planning a weekend in Lisbon together" width="100%">
 </picture>
 
-Put a few agents in one room and let them work it out together. Mention one with **@** to ask just them. Each one speaks in its own colour.
+Put a few agents in one room and let them work it out together. Mention one with **@** to ask just them. Each one speaks in its own colour. A room holds as many conversations as you like: start a new one whenever you want a clean slate, and the group and its agents stay exactly as they are.
 
 ### Text them on WhatsApp and Telegram
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useState, type RefObject } from 'react'
 import { scoped } from '@/hermes/instance'
+import { MAIN_THREAD } from '@shared/groups.ts'
 
 // What every message box shares: unsent text that survives a reload, and a
 // field that grows with what's typed.
@@ -27,7 +28,7 @@ function writeDraft(key: string, text: string) {
 /** Where an agent's next blank chat keeps what's typed into it. */
 export const newChatDraft = (agentId: string) => `${agentId}:new`
 /** Where a group keeps what's typed into it. */
-export const groupDraft = (groupId: string) => `group:${groupId}`
+export const groupDraft = (groupId: string, thread = MAIN_THREAD) => `group:${groupId}:${thread}`
 
 // The boxes on screen now, by key, so text put in from elsewhere shows at once.
 const showing = new Map<string, Set<(text: string) => void>>()

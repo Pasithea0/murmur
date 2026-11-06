@@ -13,14 +13,15 @@ import { BuddyStack } from '@/ui/buddy'
 import { Skeleton } from '@/ui/skeleton'
 import { useFinePointer, useIsWide } from '@/lib/use-media'
 import { cn } from '@/lib/cn'
-import { approveInGroup, deleteGroup, renameGroup, retryGroup, sendToGroup, stopGroup, useGroup } from '@/state/groups'
+import { approveInGroup, deleteGroup, newConversation, openConversation, renameGroup, retryGroup, sendToGroup, stopGroup, useGroup } from '@/state/groups'
 
-// A group chat: like talking to one agent, except several take turns.
+// A group chat: like talking to one agent, except several take turns — and it
+// holds as many conversations as you like, without making a new group.
 
 const HUE = 278
 
 export function GroupScreen({ groupId }: { groupId: string }) {
-  const { group, items, loaded, missing, working, stopping, active } = useGroup(groupId)
+  const { group, items, loaded, missing, working, stopping, active, thread, conversations, running } = useGroup(groupId)
   const wide = useIsWide()
   const fine = useFinePointer()
   const inset = useKeyboardInset()
@@ -67,6 +68,8 @@ export function GroupScreen({ groupId }: { groupId: string }) {
         />
 
         <Thread
+          // One thread on screen at a time, and a clean one for each conversation.
+          key={thread}
           // Messages start below the header and scroll under its glass.
           className={cn(
             '[&>[role=log]>div]:pt-[calc(3.5rem+env(safe-area-inset-top))]',
@@ -93,7 +96,7 @@ export function GroupScreen({ groupId }: { groupId: string }) {
               busy={working}
               disabled={!group}
               hue={active?.member.hue}
-              draftKey={groupDraft(groupId)}
+              draftKey={groupDraft(groupId, thread)}
               onDraftChange={onDraftChange}
               autoFocus={fine}
             />
@@ -105,6 +108,17 @@ export function GroupScreen({ groupId }: { groupId: string }) {
             open={sheet}
             onOpenChange={setSheet}
             group={group}
+            thread={thread}
+            conversations={conversations}
+            running={running}
+            onOpenConversation={(next) => {
+              if (next !== thread) openConversation(groupId, next)
+              setSheet(false)
+            }}
+            onNewConversation={() => {
+              newConversation(groupId)
+              setSheet(false)
+            }}
             onRename={(name) => renameGroup(groupId, name)}
             onDelete={async () => {
               await deleteGroup(groupId)

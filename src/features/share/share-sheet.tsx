@@ -9,7 +9,7 @@ import { addToDraft, groupDraft, newChatDraft } from '@/features/chat/use-draft'
 import { useGroupRows, type GroupRow } from '@/features/home/groups'
 import { agentAt } from '@/features/home/roster'
 import { useAgents, type Agent } from '@/state/agents'
-import { useGroupSummaries } from '@/state/groups'
+import { useGroupSummaries, openThread } from '@/state/groups'
 import { useAgentStatus, useBusyAgents } from '@/state/status'
 import { takeShare, useShared, type Shared } from './share'
 
@@ -42,7 +42,8 @@ export function ShareSheet() {
       addToDraft(newChatDraft(to.agent.id), what.text)
       navigate(`/chat/${to.agent.id}/new`)
     } else {
-      addToDraft(groupDraft(to.group.id), what.text)
+      // Into whichever conversation that group is showing.
+      addToDraft(groupDraft(to.group.id, openThread(to.group.id)), what.text)
       navigate(`/group/${to.group.id}`)
     }
   }

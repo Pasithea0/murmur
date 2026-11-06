@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { toast } from 'sonner'
+import { Check, MessageSquare, Plus } from 'lucide-react'
 import { Sheet } from '@/ui/sheet'
 import { Button } from '@/ui/button'
 import { TextField } from '@/ui/field'
@@ -8,6 +9,9 @@ import { ListGroup, ListRow } from '@/ui/list'
 import { Buddy } from '@/ui/buddy'
 import { Grow } from '@/ui/grow'
 import { ConfirmCard } from '@/ui/confirm-card'
+import { cn } from '@/lib/cn'
+import { shortTime } from '@/features/home/time'
+import type { Conversation } from '@shared/groups.ts'
 import type { Group } from '@/state/groups'
 import { MemberRow } from './member-row'
 
@@ -15,13 +19,21 @@ type Props = {
   open: boolean
   onOpenChange: (open: boolean) => void
   group: Group
+  /** The conversation on screen. */
+  thread: string
+  /** Every conversation the group has, newest first. */
+  conversations: Conversation[]
+  /** The conversation a round is running in, if one is. */
+  running?: string
+  onOpenConversation: (thread: string) => void
+  onNewConversation: () => void
   onRename: (name: string) => Promise<void>
   onDelete: () => Promise<void>
   onOpenMember: (id: string) => void
 }
 
 /** Who's in the group, its name, and the way out. */
-export function GroupSheet({ open, onOpenChange, group, onRename, onDelete, onOpenMember }: Props) {
+export function GroupSheet({ open, onOpenChange, group, thread, conversations, running, onOpenConversation, onNewConversation, onRename, onDelete, onOpenMember }: Props) {
   const [name, setName] = useState(group.name)
   const [saving, setSaving] = useState(false)
   const nameId = useId()
@@ -110,6 +122,36 @@ export function GroupSheet({ open, onOpenChange, group, onRename, onDelete, onOp
             </AnimatePresence>
           </div>
         </form>
+
+        {/* One group, many conversations: Hermes runs each as its own "thread"
+            in the room, with its own transcript and its own read marks, and
+            every member answers in it as usual. */}
+        <ListGroup
+          title="Conversations"
+          className="mt-7"
+          footer="Everyone here is in each of them. Start a new one any time — the group and its agents stay as they are."
+        >
+          {conversations.map((conversation) => {
+            const current = conversation.id === thread
+            const live = conversation.id === running
+            return (
+              <ListRow
+                key={conversation.id}
+                icon={<MessageSquare size={18} strokeWidth={1.75} className={cn(current ? 'text-accent' : 'text-ink-3')} />}
+                title={conversation.title || 'New conversation'}
+                subtitle={live ? 'Working…' : undefined}
+                detail={!live && conversation.lastAt ? shortTime(conversation.lastAt) : undefined}
+                trailing={current ? <Check size={18} strokeWidth={2.5} className="text-accent" /> : undefined}
+                onClick={() => onOpenConversation(conversation.id)}
+              />
+            )
+          })}
+          <ListRow
+            icon={<Plus size={20} strokeWidth={1.9} className="text-accent" />}
+            title="New conversation"
+            onClick={onNewConversation}
+          />
+        </ListGroup>
 
         <ListGroup title="Members" className="mt-7" footer="To change who’s here, start a new group.">
           {group.members.map((m) => (
