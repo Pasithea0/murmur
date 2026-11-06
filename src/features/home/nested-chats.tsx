@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { AnimatePresence, motion, useIsPresent } from 'motion/react'
-import { Link, useLocation } from 'wouter'
+import { useLocation } from 'wouter'
 import { ArrowRight, MoreHorizontal, Pin, Repeat, SquarePen } from 'lucide-react'
 import { create } from 'zustand'
 import type { Agent } from '@/state/agents'
@@ -12,6 +12,7 @@ import { useAgentChatList, useChatActions, useUnread, type AgentChat } from '@/f
 import { chatOptions } from '@/features/agent-page/chat-list'
 import { RenameChatSheet } from '@/features/agent-page/rename-chat'
 import { RowMenu, useLongPress } from './row-menu'
+import { Item } from './nested-row'
 
 // An agent's pinned and latest chats, tucked under its row in the sidebar,
 // with a way through to all of them on its page. Text only, on the row's name
@@ -278,57 +279,5 @@ function ChatItem({
         }))}
       />
     </Popover.Root>
-  )
-}
-
-function Item({
-  href,
-  selected,
-  open,
-  muted,
-  title,
-  nav,
-  press,
-  className,
-  children,
-}: {
-  href: string
-  selected?: boolean
-  /** Its menu is open. */
-  open?: boolean
-  muted?: boolean
-  title?: string
-  /** A chat ⌥↑/⌥↓ can land on. */
-  nav?: boolean
-  press?: ReturnType<typeof useLongPress>
-  className?: string
-  children: React.ReactNode
-}) {
-  return (
-    <Link
-      href={href}
-      title={title}
-      data-nav={nav ? 'chat' : undefined}
-      aria-current={selected ? 'page' : undefined}
-      {...press}
-      className={cn(
-        'relative isolate flex h-8 items-center gap-1.5 rounded-md px-2.5 text-footnote select-none [-webkit-touch-callout:none]',
-        'transition-colors duration-150 active:bg-fill-2',
-        selected ? 'font-medium text-ink' : cn(muted ? 'text-ink-3' : 'text-ink-2', 'hover:bg-fill-1 hover:text-ink'),
-        open && !selected && 'bg-fill-1 text-ink',
-        className,
-      )}
-    >
-      {/* The sidebar's one selection, gliding here from the agent's row. */}
-      {selected && (
-        <motion.span
-          layoutId="roster-selection"
-          aria-hidden
-          className="absolute inset-0 -z-10 rounded-md bg-accent-soft"
-          transition={{ type: 'spring', duration: 0.38, bounce: 0.12 }}
-        />
-      )}
-      {children}
-    </Link>
   )
 }

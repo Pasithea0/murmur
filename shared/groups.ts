@@ -140,7 +140,9 @@ export type ConversationRow = Conversation & {
 
 /**
  * A room's conversations as a list shows them: newest first, the ones this
- * device deleted left out, each named and marked read as that device has it.
+ * device deleted left out, each named and marked read as that device has it. A
+ * conversation is one once something has been said in it (the log) or this
+ * device remembers saying so — a conversation merely being started is neither.
  */
 export function conversationRows(
   fromLog: Conversation[],
@@ -167,8 +169,9 @@ export function conversationRows(
   } = {},
 ): ConversationRow[] {
   const gone = new Set(deleted)
+  const real = new Set([...fromLog.map((c) => c.id), ...known])
   return mergeConversations(fromLog, known, open ?? '')
-    .filter((conversation) => !gone.has(conversation.id))
+    .filter((conversation) => real.has(conversation.id) && !gone.has(conversation.id))
     .map((conversation) => {
       const last = events.findLast((e) => e.kind === 'message.member' && threadOf(e) === conversation.id)?.seq ?? 0
       return {

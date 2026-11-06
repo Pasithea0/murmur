@@ -178,4 +178,8 @@ describe('conversationRows', () => {
   it('still lists a conversation the log has scrolled past', () => {
     expect(conversationRows([], { known: ['c-old'], open: 'c-old' }).map((row) => row.id)).toEqual(['c-old'])
   })
+
+  it('leaves out a conversation merely being started, before anything is said in it', () => {
+    expect(conversationRows(conversations, { open: 'c-being-started' }).map((row) => row.id)).toEqual(['main', 'c-one'])
+  })
 })

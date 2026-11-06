@@ -141,7 +141,7 @@ export function ConversationList({ group, rows, deleted, running, pending, onNew
 
       <HiddenSheet group={group} rows={deleted} open={hidden} onOpenChange={setHidden} onRestore={onRestore} />
       <RenameConversationSheet
-        group={group}
+        faces={{ hues: (group?.members ?? []).map((m) => m.hue), seeds: (group?.members ?? []).map((m) => m.id) }}
         conversation={renaming}
         onClose={() => setRenaming(null)}
         onRename={(title) => onRename(renaming!.id, title)}

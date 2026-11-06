@@ -23,17 +23,18 @@ import { Button } from '@/ui/button'
 import { fetchAgentChats, useAgentChats, useAgents, type Agent } from '@/state/agents'
 import { settledAt, useAgentStatus, useBusyAgents, useChatUnread, useNeedsYou, useUnreadCount } from '@/state/status'
 import { sectionOf, setFolded, useFoldedMap, type Section } from '@/state/sections'
-import { prefetchGroup, useGroupSummaries } from '@/state/groups'
+import { prefetchGroup, prefetchGroupChats, useGroupSummaries, useShowsConversation } from '@/state/groups'
 import { useAccessRequests } from '@/state/access'
 import { RequestCard } from '@/features/access/request-card'
 import { useAgentChatList } from '@/features/agent-page/chats'
+import { NestedConversations } from './nested-conversations'
 import { cn } from '@/lib/cn'
 import { useGroupRows, type GroupRow } from './groups'
 import { shortTime } from './time'
 import { Bone } from './bone'
 import { RowMenu, useLongPress, type MenuItem } from './row-menu'
 import type { SectionActions } from './actions'
-import { setExpanded, useExpanded } from './expanded'
+import { groupFold, setExpanded, useExpanded } from './expanded'
 import { NestedChats, useShowsChat } from './nested-chats'
 
 // The roster: one row per agent and per group, newest activity first.
@@ -50,6 +51,8 @@ type RosterProps = {
   selectedId?: string
   /** The chat open beside the sidebar: its agent's latest chats show beneath its row, this one highlighted. */
   openChatId?: string
+  /** The conversation open beside the sidebar, the same way. */
+  openThreadId?: string
   onEdit: (agent: Agent) => void
   onDelete: (agent: Agent) => void
   onRenameGroup: (group: GroupRow) => void
@@ -64,6 +67,7 @@ export function Roster({
   density,
   selectedId,
   openChatId,
+  openThreadId,
   onEdit,
   onDelete,
   onRenameGroup,
@@ -350,6 +354,7 @@ export function Roster({
                     group={entry.group}
                     density={density}
                     selected={entry.key === selectedId}
+                    openThreadId={entry.key === selectedId ? openThreadId : undefined}
                     last={last}
                     fresh={freshArrival(entry.key)}
                     onRename={() => onRenameGroup(entry.group)}
@@ -577,23 +582,33 @@ function GroupRowView({
   group,
   density,
   selected,
+  openThreadId,
   last,
   fresh,
   onRename,
   onDelete,
   move,
-}: Shared & { group: GroupRow; onRename: () => void; onDelete: () => void; move?: MenuItem }) {
+}: Shared & { group: GroupRow; openThreadId?: string; onRename: () => void; onDelete: () => void; move?: MenuItem }) {
   const [menu, setMenu] = useState(false)
   const press = useLongPress(() => setMenu(true))
   const [halo] = useState(fresh)
   const roomy = density === 'roomy'
   const size = roomy ? 52 : 40
   const unread = group.unread && !group.live
-  // Start loading on press, so the conversation is there when the screen is.
+  // The sidebar's groups fold open to their latest conversations, as its agents
+  // fold open to their chats (the one you're in opens itself).
+  const expanded = useExpanded(groupFold(group.id), !!selected) && !roomy
+  const conversationsId = useId()
+  // With the open conversation listed beneath, the highlight belongs to it.
+  const showsConversation = useShowsConversation(group.id, expanded, openThreadId) && !!openThreadId
+  // Start loading on press, so the conversation is there when the screen is;
+  // and on the way into the fold, so the list is ready as it opens.
   const warm = () => prefetchGroup(group.id)
 
   const subtitle = group.live ? (
-    <span className="text-shimmer">Talking it over</span>
+    <span className="text-shimmer">{openThreadId === group.liveThread ? 'Talking it over' : 'Talking it over elsewhere'}</span>
+  ) : expanded ? (
+    <span className="text-ink-3">{`${group.memberIds.length} agents`}</span>
   ) : (
     <span className={cn(!group.subtitle && 'text-ink-3')}>{group.subtitle ?? `${group.memberIds.length} agents`}</span>
   )
@@ -615,9 +630,20 @@ function GroupRowView({
             }}
             open={menu}
             roomy={roomy}
-            selected={selected}
+            selected={selected && !showsConversation}
             unread={unread}
             label={unread ? `${group.name}, new messages` : undefined}
+            disclosure={
+              roomy
+                ? undefined
+                : {
+                    open: expanded,
+                    controls: conversationsId,
+                    onToggle: () => setExpanded(groupFold(group.id), !expanded),
+                    onWarm: () => prefetchGroupChats(group.id),
+                    things: 'conversations',
+                  }
+            }
             face={
               <span className={cn('relative flex-none [&_.buddy]:block', roomy && 'my-2.5')}>
                 {halo && <Halo id={`group:${group.id}`} />}
@@ -626,11 +652,20 @@ function GroupRowView({
             }
             name={group.name}
             time={group.live ? 'now' : shortTime(group.at)}
-            subtitleKey={group.live ? 'live' : 'line'}
+            subtitleKey={group.live ? 'live' : expanded ? 'agents' : 'line'}
             subtitle={subtitle}
             last={last}
-            onMore={() => setMenu(true)}
+            newChat={`/group/${group.id}/new`}
+            newChatLabel={`New conversation in ${group.name}`}
           />
+          {!roomy && (
+            <NestedConversations
+              id={conversationsId}
+              group={group}
+              open={expanded}
+              openThreadId={openThreadId}
+            />
+          )}
         </div>
       </Popover.Anchor>
       <RowMenu
@@ -891,7 +926,14 @@ const clearsMore = (roomy: boolean, line: 'name' | 'subtitle') =>
 type Press = ReturnType<typeof useLongPress> & { onPointerEnter?: (e: React.PointerEvent) => void }
 
 /** The sidebar's fold-open control for an agent's chats. */
-type Disclosure = { open: boolean; controls: string; onToggle: () => void; onWarm?: () => void }
+type Disclosure = {
+  open: boolean
+  controls: string
+  onToggle: () => void
+  onWarm?: () => void
+  /** What the row folds open: an agent's chats, a group's conversations. */
+  things?: string
+}
 
 // With a disclosure, the More button sits one step in from the edge, so the
 // chevron can keep the edge (and its place) whether the row is open or not.
@@ -922,6 +964,7 @@ function RowLink({
   subtitle,
   last,
   newChat,
+  newChatLabel,
   onMore,
   disclosure,
 }: {
@@ -940,8 +983,11 @@ function RowLink({
   subtitleKey: string
   subtitle: ReactNode
   last?: boolean
-  /** On hover, beside the chevron: a new chat with the agent (its menu is a right-click or a hold away)… */
+  /** On hover, beside the chevron: a new chat with the agent, or conversation in the group
+   * (its menu is a right-click or a hold away)… */
   newChat?: string
+  /** What the "+" starts, for its name: an agent's chat, a group's conversation. */
+  newChatLabel?: string
   /** …or a group's menu, for mice and keyboards (touch holds the row). */
   onMore?: () => void
   disclosure?: Disclosure
@@ -1072,7 +1118,12 @@ function RowLink({
         </span>
       </Link>
       {newChat ? (
-        <Link href={newChat} aria-label={`New chat with ${name}`} title="New chat" className={quick(roomy, !!disclosure)}>
+        <Link
+          href={newChat}
+          aria-label={newChatLabel ?? `New chat with ${name}`}
+          title={newChatLabel ?? `New chat with ${name}`}
+          className={quick(roomy, !!disclosure)}
+        >
           <Plus size={roomy ? 18 : 16} strokeWidth={2} aria-hidden />
         </Link>
       ) : (
@@ -1095,8 +1146,8 @@ function RowLink({
           onFocus={disclosure.onWarm}
           aria-expanded={disclosure.open}
           aria-controls={disclosure.controls}
-          aria-label={`${disclosure.open ? 'Hide' : 'Show'} ${name}’s chats`}
-          title={disclosure.open ? 'Hide chats' : 'Show chats'}
+          aria-label={`${disclosure.open ? 'Hide' : 'Show'} ${name}’s ${disclosure.things ?? 'chats'}`}
+          title={disclosure.open ? `Hide ${disclosure.things ?? 'chats'}` : `Show ${disclosure.things ?? 'chats'}`}
           className={cn(
             'pressable absolute top-1/2 right-2 grid size-7 -translate-y-1/2 place-items-center rounded-full text-ink-3 hover:bg-fill-2 hover:text-ink',
             'transition-opacity duration-150 ease-out',

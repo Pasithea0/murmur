@@ -14,6 +14,8 @@ export type GroupRow = {
   at: number
   /** A round is running. */
   live: boolean
+  /** The conversation a round is running in, if one is. */
+  liveThread?: string
   /** Someone said something since you last looked. */
   unread: boolean
 }
@@ -28,6 +30,7 @@ export function useGroupRows(): GroupRow[] {
     subtitle: g.lastLine || undefined,
     at: g.lastActivityAt,
     live: g.live,
+    liveThread: g.liveThread,
     unread: g.unread,
   }))
 }
