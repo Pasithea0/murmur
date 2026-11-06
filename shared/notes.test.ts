@@ -129,6 +129,13 @@ describe('groupNote', () => {
   it('says who needs an OK', () => {
     expect(groupAskNote({ id: 'g', name: 'Trip' }, 'Atlas')).toMatchObject({ title: 'Trip', body: 'Atlas needs your OK', href: '/group/g' })
   })
+
+  it('opens the conversation it is about, when it knows which', () => {
+    expect(groupNote({ id: 'g', name: 'Trip', lastLine: 'Atlas: Sounds good', thread: 'c-two' })).toMatchObject({
+      href: '/group/g/c-two',
+    })
+    expect(groupAskNote({ id: 'g', name: 'Trip', thread: 'c two' }, 'Atlas')).toMatchObject({ href: '/group/g/c%20two' })
+  })
 })
 
 describe('runNote', () => {

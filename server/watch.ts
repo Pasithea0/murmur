@@ -19,7 +19,7 @@
 // then (a reply, a question waiting, a run, a round) is told as it would be.
 
 import { agentName, titleCase, type NamedProfile } from '../shared/agents.ts'
-import { joinNames, lastLine, liveFromLog, TERMINAL, type RoomEvent } from '../shared/groups.ts'
+import { joinNames, lastLine, liveFromLog, TERMINAL, threadOf, activeThread, type RoomEvent } from '../shared/groups.ts'
 import { askNote, askText, groupAskNote, groupNote, replyNote, runNote, type Note, type StoredMessage } from '../shared/notes.ts'
 import {
   couldntRun,
@@ -333,6 +333,10 @@ export function createWatcher({ call, get, put = async () => false, tell, now = 
       room.members.map(async (m) => ({ id: m.member_id, handle: m.handle, name: await nameOf(m.profile, m.display_name) })),
     )
     const group = { id: room.room_id, name: room.name?.trim() || joinNames(roster.map((m) => m.name)) }
+    // Which of the room's conversations this is about: the one a round is
+    // running in, or — once a round has been wrapped up — the one last spoken
+    // in. A note opens right there, rather than at the room's list.
+    const thread = activeThread(events, now()) ?? spokeIn(events)
     // While a round runs, the OKs it waits on.
     const asks = known?.asks ?? new Set<string>()
     const open = new Map<string, PendingAction>()
@@ -352,11 +356,11 @@ export function createWatcher({ call, get, put = async () => false, tell, now = 
       if (asks.has(key)) continue
       asks.add(key)
       const who = roster.find((m) => m.id === action.member_id)?.name ?? 'An agent'
-      tell({ kind: 'ask', key, note: groupAskNote(group, who) })
+      tell({ kind: 'ask', key, note: groupAskNote({ ...group, thread }, who) })
     }
     rooms.set(room.room_id, { seq, live: isLive, asks })
     if (known?.live && !isLive) {
-      const note = groupNote({ ...group, lastLine: lastLine(events, roster) })
+      const note = groupNote({ ...group, thread, lastLine: lastLine(events, roster) })
       if (note) tell({ kind: 'note', note })
     }
   }
@@ -379,6 +383,12 @@ export function createWatcher({ call, get, put = async () => false, tell, now = 
 /** Oldest first, in the order Hermes saved them (its ids count up; two can share a timestamp). */
 const chronological = (rows: MessageRow[]) =>
   [...rows].sort((a, b) => (a.id !== undefined && b.id !== undefined ? a.id - b.id : (a.timestamp ?? 0) - (b.timestamp ?? 0)))
+
+/** The conversation a room's newest thing was said in: what a note about a round that just ended is about. */
+const spokeIn = (events: RoomEvent[]) => {
+  const said = events.findLast((event) => event.kind === 'message.user')
+  return said ? threadOf(said) : undefined
+}
 
 /** The person said something in it, beyond the brief a routine's run starts with. */
 const repliedIn = (messages: StoredMessage[]) => messages.some((m) => m.role === 'user' && m.content?.trim() && !isRunBrief(m.content))

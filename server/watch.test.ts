@@ -406,7 +406,7 @@ describe('groups', () => {
 
     state.pending['room-1'] = [{ kind: 'approval', task_id: 't1', request_id: 'apr-1', member_id: 'm1' }]
     await watcher.groups()
-    expect(told).toEqual([{ kind: 'ask', key: 'group:room-1:apr-1', note: { title: 'Trip', body: 'Atlas needs your OK', tag: 'murmur:group:room-1', href: '/group/room-1' } }])
+    expect(told).toEqual([{ kind: 'ask', key: 'group:room-1:apr-1', note: { title: 'Trip', body: 'Atlas needs your OK', tag: 'murmur:group:room-1', href: '/group/room-1/main' } }])
 
     state.pending['room-1'] = []
     state.rooms[0].latest_seq = 3
@@ -414,9 +414,29 @@ describe('groups', () => {
     await watcher.groups()
     expect(told.slice(1)).toEqual([
       { kind: 'answered', key: 'group:room-1:apr-1' },
-      { kind: 'note', note: { title: 'Trip', body: 'Atlas: Lisbon, @Hermes?', tag: 'murmur:group:room-1', href: '/group/room-1' } },
+      { kind: 'note', note: { title: 'Trip', body: 'Atlas: Lisbon, @Hermes?', tag: 'murmur:group:room-1', href: '/group/room-1/main' } },
     ])
     expect(watcher.rounds()).toBe(false)
+  })
+
+  it('opens the conversation a note is about, not the group', async () => {
+    const { state, told, watcher } = fakeHermes()
+    state.rooms = [{ room_id: 'room-3', name: 'Trip', members: [{ member_id: 'm1', profile: 'atlas', handle: 'atlas' }], latest_seq: 1 }]
+    state.logs['room-3'] = [ev(1, 'message.user', { text: '@atlas thoughts?', thread_id: 'c-two' })]
+    await watcher.groups()
+    state.pending['room-3'] = [{ kind: 'approval', task_id: 't1', request_id: 'apr-9', member_id: 'm1' }]
+    await watcher.groups()
+    expect(told.at(-1)).toMatchObject({ kind: 'ask', note: { href: '/group/room-3/c-two' } })
+
+    state.pending['room-3'] = []
+    state.rooms[0].latest_seq = 3
+    state.logs['room-3'] = [
+      ...state.logs['room-3'],
+      ev(2, 'message.member', { member_id: 'm1', text: 'Lisbon', thread_id: 'c-two' }),
+      ev(3, 'room.activity', { thread_id: 'c-two' }),
+    ]
+    await watcher.groups()
+    expect(told.at(-1)).toMatchObject({ kind: 'note', note: { href: '/group/room-3/c-two' } })
   })
 
   it('follows a round longer than its last few messages until it ends', async () => {
@@ -433,6 +453,8 @@ describe('groups', () => {
     state.logs['room-2'].push(ev(31, 'room.activity'))
     state.rooms[0].latest_seq = 31
     await watcher.groups()
+    // The tail read no longer reaches the message that started it, so the note
+    // falls back to the group's list rather than guessing a conversation.
     expect(told).toEqual([{ kind: 'note', note: { title: 'Debate', body: 'Hermes: Point 30', tag: 'murmur:group:room-2', href: '/group/room-2' } }])
   })
 

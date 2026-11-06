@@ -13,15 +13,36 @@ import { BuddyStack } from '@/ui/buddy'
 import { Skeleton } from '@/ui/skeleton'
 import { useFinePointer, useIsWide } from '@/lib/use-media'
 import { cn } from '@/lib/cn'
-import { approveInGroup, deleteGroup, newConversation, openConversation, renameGroup, retryGroup, sendToGroup, stopGroup, useGroup } from '@/state/groups'
+import { approveInGroup, deleteGroup, draftConversation, renameGroup, retryGroup, sendToGroup, stopGroup, useGroup } from '@/state/groups'
 
-// A group chat: like talking to one agent, except several take turns — and it
-// holds as many conversations as you like, without making a new group.
+// One conversation of a group: like talking to one agent, except several take
+// turns — and a group holds as many conversations as you like.
 
 const HUE = 278
+/** The address of a conversation being started: it has no id until something is said in it. */
+const NEW = 'new'
 
-export function GroupScreen({ groupId }: { groupId: string }) {
-  const { group, items, loaded, missing, working, stopping, active, thread, conversations, running } = useGroup(groupId)
+export function GroupScreen({ groupId, thread }: { groupId: string; thread: string }) {
+  // A conversation being started: its id is minted on arriving here, and kept
+  // for as long as the screen is on it, so a re-render doesn't make another.
+  const draftThread = useRef<string>('')
+  const arrivingAtNew = useRef(false)
+  if (thread === NEW && !arrivingAtNew.current) {
+    draftThread.current = draftConversation()
+    arrivingAtNew.current = true
+  }
+  if (thread !== NEW) arrivingAtNew.current = false
+  // The id a conversation started here was born under, so becoming real doesn't
+  // remount the thread on screen.
+  const born = useRef<string>('')
+  const starting = thread === NEW
+
+  // The screen shows the conversation it is on: the one the address names, or
+  // the one being started, which is empty and belongs to no address yet.
+  const { group, items, loaded, missing, working, stopping, active } = useGroup(
+    groupId,
+    starting ? draftThread.current : thread,
+  )
   const wide = useIsWide()
   const fine = useFinePointer()
   const inset = useKeyboardInset()
@@ -41,7 +62,18 @@ export function GroupScreen({ groupId }: { groupId: string }) {
   // While you type, whoever you're addressing looks down to listen.
   const listening =
     draft.typing && !working ? (draft.mentioned.length ? draft.mentioned : members.map((m) => m.id)) : []
-  const send = (text: string) => void sendToGroup(groupId, text)
+  const send = (text: string) => {
+    // The first word said in a new conversation is what gives it a name of its
+    // own: it keeps the id this screen minted, and the address follows.
+    if (starting) {
+      born.current = draftThread.current
+      void sendToGroup(groupId, text, draftThread.current)
+      navigate(`/group/${encodeURIComponent(groupId)}/${encodeURIComponent(draftThread.current)}`, { replace: true })
+      return
+    }
+    void sendToGroup(groupId, text)
+  }
+  const newConversation = () => navigate(`/group/${encodeURIComponent(groupId)}/${NEW}`)
 
   return (
     <MotionConfig reducedMotion="user">
@@ -63,13 +95,16 @@ export function GroupScreen({ groupId }: { groupId: string }) {
           listening={listening}
           mentioned={draft.mentioned}
           showBack={!wide}
+          back={{ href: `/group/${encodeURIComponent(groupId)}`, label: 'Conversations' }}
           scrolled={scrolled}
           onOpen={() => setSheet(true)}
+          onNew={newConversation}
         />
 
         <Thread
-          // One thread on screen at a time, and a clean one for each conversation.
-          key={thread}
+          // One conversation on screen at a time: a clean thread for each, and
+          // the one started here carries on in place once it has a name.
+          key={starting || (born.current && thread === born.current) ? NEW : thread}
           // Messages start below the header and scroll under its glass.
           className={cn(
             '[&>[role=log]>div]:pt-[calc(3.5rem+env(safe-area-inset-top))]',
@@ -108,16 +143,9 @@ export function GroupScreen({ groupId }: { groupId: string }) {
             open={sheet}
             onOpenChange={setSheet}
             group={group}
-            thread={thread}
-            conversations={conversations}
-            running={running}
-            onOpenConversation={(next) => {
-              if (next !== thread) openConversation(groupId, next)
+            onOpenConversations={() => {
               setSheet(false)
-            }}
-            onNewConversation={() => {
-              newConversation(groupId)
-              setSheet(false)
+              navigate(`/group/${encodeURIComponent(groupId)}`)
             }}
             onRename={(name) => renameGroup(groupId, name)}
             onDelete={async () => {

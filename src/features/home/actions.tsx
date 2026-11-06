@@ -161,7 +161,8 @@ export function useAgentActions() {
       const id = await createGroup(group)
       if (!id) return
       setGrouping(false)
-      navigate(`/group/${id}`)
+      // Straight into a conversation: the group's page is for what it already holds.
+      navigate(`/group/${id}/new`)
     } catch (e) {
       fail(e)
     } finally {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   activeThread,
+  conversationRows,
   conversationsIn,
   lastLine,
   liveFromLog,
@@ -137,5 +138,44 @@ describe('mergeConversations', () => {
   it('never lists a conversation twice', () => {
     const fromLog = conversationsIn([event('message.user', { text: 'Hi', thread_id: 'c-one' })])
     expect(mergeConversations(fromLog, ['c-one', 'c-old', 'c-old'], 'c-one').map((c) => c.id)).toEqual(['c-old', 'c-one'])
+  })
+})
+
+describe('conversationRows', () => {
+  const log = [
+    event('message.user', { text: 'Plan the trip', thread_id: 'c-one' }, 60),
+    event('message.member', { member_id: 'm1', text: 'On it', thread_id: 'c-one' }, 55),
+    event('message.user', { text: 'What’s for dinner?' }, 30),
+    event('message.member', { member_id: 'm2', text: 'Pasta' }, 25),
+  ]
+  const conversations = conversationsIn(log)
+  // Their seqs are what a device's read marks are compared against.
+  const one = { asked: log[0], reply: log[1] }
+  const dinner = { asked: log[2], reply: log[3] }
+
+  it('leaves out the ones this device deleted, and keeps the rest newest first', () => {
+    const rows = conversationRows(conversations, { deleted: ['main'] })
+    expect(rows.map((row) => row.id)).toEqual(['c-one'])
+  })
+
+  it('calls a conversation what this device named it, else what was first asked', () => {
+    const rows = conversationRows(conversations, { names: { 'c-one': 'Trip' } })
+    // Most recently spoken in first: dinner (main) moved last.
+    expect(rows.map((row) => row.title)).toEqual(['What’s for dinner?', 'Trip'])
+  })
+
+  it('marks a conversation unread until this device has read that far', () => {
+    // Read up to the newest thing in each: nothing to catch up on.
+    const read = { 'c-one': one.reply.seq, main: dinner.reply.seq }
+    expect(conversationRows(conversations, { seen: read, events: log }).every((row) => !row.unread)).toBe(true)
+    // Read up to the message before the agents answered: the reply is unseen.
+    const behind = { 'c-one': one.asked.seq }
+    expect(conversationRows(conversations, { seen: behind, events: log }).find((r) => r.id === 'c-one')?.unread).toBe(true)
+    // Never read at all: an agent's reply alone counts as news.
+    expect(conversationRows(conversations, { events: log }).find((r) => r.id === 'c-one')?.unread).toBe(true)
+  })
+
+  it('still lists a conversation the log has scrolled past', () => {
+    expect(conversationRows([], { known: ['c-old'], open: 'c-old' }).map((row) => row.id)).toEqual(['c-old'])
   })
 })

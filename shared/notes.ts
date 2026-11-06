@@ -45,7 +45,8 @@ export const groupTag = (groupId: string) => `murmur:group:${groupId}`
 
 export const chatHref = (chat: { id: string; profile: string }) =>
   `/chat/${encodeURIComponent(chat.profile)}/${encodeURIComponent(chat.id)}`
-export const groupHref = (groupId: string) => `/group/${encodeURIComponent(groupId)}`
+export const groupHref = (groupId: string, thread?: string) =>
+  `/group/${encodeURIComponent(groupId)}${thread ? `/${encodeURIComponent(thread)}` : ''}`
 
 // ── Replies ─────────────────────────────────────────────────────────────────
 
@@ -156,13 +157,23 @@ export function runNote({
   return { title: title(routine), body, tag: chatTag(at), href: chatHref({ id: at, profile: agentId }) }
 }
 
-/** A group's round ended with something new from its agents. */
-export function groupNote(group: { id: string; name: string; lastLine: string }): Note | null {
+/** A group's round ended with something new from its agents, in one of its conversations. */
+export function groupNote(group: { id: string; name: string; lastLine: string; thread?: string }): Note | null {
   if (!group.lastLine || group.lastLine.startsWith('You: ')) return null
-  return { title: title(group.name), body: clip(group.lastLine), tag: groupTag(group.id), href: groupHref(group.id) }
+  return {
+    title: title(group.name),
+    body: clip(group.lastLine),
+    tag: groupTag(group.id),
+    href: groupHref(group.id, group.thread),
+  }
 }
 
-/** One of a group's agents needs the person's OK. */
-export function groupAskNote(group: { id: string; name: string }, who: string): Note {
-  return { title: title(group.name), body: `${who} needs your OK`, tag: groupTag(group.id), href: groupHref(group.id) }
+/** One of a group's agents needs the person's OK, in one of its conversations. */
+export function groupAskNote(group: { id: string; name: string; thread?: string }, who: string): Note {
+  return {
+    title: title(group.name),
+    body: `${who} needs your OK`,
+    tag: groupTag(group.id),
+    href: groupHref(group.id, group.thread),
+  }
 }
