@@ -14,6 +14,7 @@ import { hueFor } from '@/lib/hues'
 import { toAgent, useAgents, type Agent, type Profile } from '@/state/agents'
 import { friendlyError, resumeHolding } from '@/state/chats'
 import { toolLabel } from '@/features/chat/tool-labels'
+import { currentTitle } from '@/features/chat/reasoning'
 import type { ApprovalChoice, ChatItem, Speaker } from '@/features/chat/types'
 import { mentionedIds, toHandles, toNames } from '@shared/mentions.ts'
 import {
@@ -511,12 +512,17 @@ function forgetConversations(id: string) {
 // ── Live state ──────────────────────────────────────────────────────────────
 
 type ToolItem = Extract<ChatItem, { kind: 'tool' }>
+type ThinkingItem = Extract<ChatItem, { kind: 'thinking' }>
+/** What a member did, and thought, during a turn — kept with the reply it produced. */
+type Trail = (ToolItem | ThinkingItem)[]
 
 /** A member's turn, as it streams in from their copy of the room. */
 type Stream = {
   id: string
   member: string
   text: string
+  /** What it's thinking, as Hermes streams it — the reasoning an agent's chat shows too. */
+  reasoning: string
   tools: ToolItem[]
   startedAt: number
   /** Log position the turn began after (unknown until the next poll lands). */
@@ -574,8 +580,8 @@ type Live = {
   approvals: Approval[]
   /** Log event id → the id it was first shown under, so nothing re-mounts. */
   aliases: Record<string, string>
-  /** Steps seen live, kept beside the message once the log takes over. */
-  trail: Record<string, ToolItem[]>
+  /** Steps and reasoning seen live, kept beside the message once the log takes over. */
+  trail: Record<string, Trail>
   /** When Stop was pressed, until Hermes confirms the round is over. */
   stopping?: number
 }
@@ -770,14 +776,16 @@ function apply(id: string, state: StateResult, fresh: RoomEvent[], cursor: numbe
         if (ended) {
           if (ended.kind === 'message.member') {
             aliases[ended.event_id] = `${s.id}-a`
-            if (s.tools.length) trail[ended.event_id] = s.tools.map(settle)
+            // What it thought and did stays with the reply the log now holds.
+            const kept = [...(s.reasoning.trim() ? [thinkingOf(s)] : []), ...s.tools.map(settle)]
+            if (kept.length) trail[ended.event_id] = kept
           }
           continue
         }
       }
       // Nothing is running and this turn predates our look: it's over. (A finished
       // reply waits for the log to take over, so it never blinks out.)
-      const waiting = s.done && visibleText(s.text) && Date.now() - s.startedAt < 120_000
+      const waiting = s.done && (visibleText(s.text) || s.reasoning.trim()) && Date.now() - s.startedAt < 120_000
       if (!driver?.working && s.startedAt < startedAt && !waiting) continue
       streams[k] = s.after === null && s.startedAt < startedAt ? { ...s, after: end } : s
     }
@@ -828,6 +836,14 @@ function apply(id: string, state: StateResult, fresh: RoomEvent[], cursor: numbe
 const requestIdOf = (a: PendingAction) => String(a.request_id ?? a.approval?.request_id ?? a.task_id)
 const settle = (t: ToolItem): ToolItem =>
   t.status === 'running' ? { ...t, status: 'done', endedAt: t.endedAt ?? Date.now() } : t
+/** A finished turn's reasoning, as the row that opens onto it. */
+const thinkingOf = (s: Stream): ThinkingItem => ({
+  kind: 'thinking',
+  id: `${s.id}-r`,
+  text: s.reasoning.trim(),
+  streaming: false,
+  startedAt: s.startedAt,
+})
 
 function markSeenIfVisible(id: string, live: Live) {
   if (watchers.has(id) && document.visibilityState === 'visible') markSeen(id, live.cursor)
@@ -895,6 +911,7 @@ function updateStream(id: string, member: string, fn: (s: Stream) => Partial<Str
       id: uid(`live-${member}`),
       member,
       text: '',
+      reasoning: '',
       tools: [],
       startedAt: Date.now(),
       after: null,
@@ -934,6 +951,14 @@ function onEvent(ev: GatewayEvent) {
       return
     case 'message.delta':
       return updateStream(room, member, (s) => ({ text: s.text ? s.text + text : text.trimStart(), done: false }))
+    // What it's thinking, as it thinks it: the same reasoning an agent's chat
+    // shows, and what gives the room's work line something to say and to open.
+    case 'reasoning.delta':
+      return updateStream(room, member, (s) => ({ reasoning: s.reasoning + text }))
+    case 'reasoning.available':
+      // Hermes sends the turn's whole reasoning when it is done with it: fuller
+      // than the deltas, so it takes their place.
+      return text.trim() ? updateStream(room, member, () => ({ reasoning: text })) : undefined
     case 'tool.start': {
       const name = String(payload.name ?? 'tool')
       const label = toolLabel(name, payload.args, typeof payload.context === 'string' ? payload.context : undefined)
@@ -1321,7 +1346,10 @@ const loggedReplies = (events: RoomEvent[]) =>
 const liveStreams = (streams: Record<string, Stream>, logged: Set<string>) =>
   Object.values(streams)
     .filter(
-      (s) => !s.done || ((visibleText(s.text) || s.tools.length) && !logged.has(`${s.member}\u0000${s.text.trim()}`)),
+      (s) =>
+        !s.done ||
+        ((visibleText(s.text) || s.tools.length || s.reasoning.trim()) &&
+          !logged.has(`${s.member}\u0000${s.text.trim()}`)),
     )
     .sort((a, b) => a.startedAt - b.startedAt)
 
@@ -1416,6 +1444,19 @@ function present(live: Shown, cast: Cast, streams: Stream[], history: ChatItem[]
   for (const s of streams) {
     const who = speaker(s.member)
     const text = visibleText(s.text)
+    const thinking = s.reasoning.trim()
+    // What it's thinking, as it thinks it: the room's work line takes its words
+    // from it (features/chat/work.tsx reads the newest titled section), and
+    // opening the line shows the whole of it.
+    if (thinking)
+      items.push({
+        kind: 'thinking',
+        id: `${s.id}-r`,
+        text: thinking,
+        streaming: !s.done,
+        startedAt: s.startedAt,
+        speaker: say(who),
+      })
     for (const t of s.tools) items.push({ ...t, speaker: say(who) })
     if (text)
       items.push({
@@ -1426,7 +1467,7 @@ function present(live: Shown, cast: Cast, streams: Stream[], history: ChatItem[]
         at: s.startedAt,
         speaker: say(who),
       })
-    else if (!s.tools.length)
+    else if (!s.tools.length && !thinking)
       items.push({
         kind: 'thinking',
         id: `${s.id}-t`,
@@ -1438,9 +1479,13 @@ function present(live: Shown, cast: Cast, streams: Stream[], history: ChatItem[]
     for (const a of live.approvals.filter((a) => a.member === s.member)) items.push(approvalItem(a))
     if (!s.done) {
       const running = s.tools.findLast((t) => t.status === 'running')
+      // Its own words for what it's doing, when its reasoning has section titles.
+      const about = thinking ? currentTitle(thinking) : null
       active = running
         ? { member: who, phase: 'working', label: running.label }
-        : { member: who, phase: text ? 'replying' : 'thinking' }
+        : about
+          ? { member: who, phase: 'working', label: about }
+          : { member: who, phase: text ? 'replying' : 'thinking' }
     }
   }
 
