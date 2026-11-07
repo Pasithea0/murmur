@@ -6,6 +6,7 @@ import {
   lastLine,
   liveFromLog,
   mergeConversations,
+  queuedThreads,
   threadOf,
   type RoomEvent,
 } from './groups.ts'
@@ -99,13 +100,50 @@ describe('activeThread', () => {
     expect(activeThread([...asked, event('room.activity', { thread_id: 'c-one' })], now)).toBeUndefined()
   })
 
-  it('is the round you started most recently, not an older one still open', () => {
+  it('is the round you started first, not the one you spoke in last', () => {
+    // Hermes runs a room's conversations one at a time, oldest first, so a
+    // conversation started while another is mid-round waits its turn.
     const log = [
       event('message.user', { text: 'Hi', thread_id: 'c-one' }, 60),
       event('message.user', { text: 'And this?', thread_id: 'c-two' }, 40),
       event('message.member', { member_id: 'm2', text: 'Sure', thread_id: 'c-two' }, 35),
     ]
+    expect(activeThread(log, now)).toBe('c-one')
+    // Both are waiting: c-two's round hasn't been wrapped up either.
+    expect(queuedThreads(log, now)).toEqual(['c-one', 'c-two'])
+  })
+
+  it('hands over to the next conversation once a round is wrapped up', () => {
+    const first = event('message.user', { text: 'Hi', thread_id: 'c-one' }, 60)
+    const log = [
+      first,
+      event('message.user', { text: 'And this?', thread_id: 'c-two' }, 40),
+      event('room.activity', { thread_id: 'c-one', discussion_event_id: first.event_id }, 30),
+    ]
     expect(activeThread(log, now)).toBe('c-two')
+  })
+
+  it('queues every conversation waiting its turn, oldest first', () => {
+    const log = [
+      event('message.user', { text: 'One', thread_id: 'c-one' }, 90),
+      event('message.user', { text: 'Two', thread_id: 'c-two' }, 60),
+      event('message.user', { text: 'Three', thread_id: 'c-three' }, 30),
+    ]
+    expect(queuedThreads(log, now)).toEqual(['c-one', 'c-two', 'c-three'])
+    // Only the last thing said in a conversation is the round that runs for it,
+    // so saying it again moves that conversation to the back of the queue.
+    expect(queuedThreads([...log, event('message.user', { text: 'Two again', thread_id: 'c-two' }, 20)], now))
+      .toEqual(['c-one', 'c-three', 'c-two'])
+  })
+
+  it('lets a message said after a Stop start a round', () => {
+    const log = [
+      event('message.user', { text: 'Hi', thread_id: 'c-one' }, 60),
+      event('room.stop_requested', {}, 50),
+      event('message.user', { text: 'Again', thread_id: 'c-two' }, 40),
+    ]
+    expect(activeThread(log, now)).toBe('c-two')
+    expect(queuedThreads(log, now)).toEqual(['c-two'])
   })
 
   it('knows a round wrapped up in one conversation doesn’t answer for another', () => {

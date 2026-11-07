@@ -183,19 +183,47 @@ export function conversationRows(
 }
 
 /**
- * The conversation the room is working in right now, if a round is running
- * there: the newest thing you said whose thread hasn't been wrapped up since.
- * A Stop or a disband speaks for the whole room, so nothing is running then.
+ * The conversations that still have a round to run, the one Hermes works first
+ * at the front. Empty when nothing is waiting.
+ *
+ * Hermes runs a room's conversations one at a time, oldest first: its planner
+ * takes "the oldest latest-per-thread user message not stopped and not yet
+ * completed" (`plan_next_task`, `gateway/hosted_room_discussion.py`), so a
+ * conversation you start while another is mid-round waits its turn instead of
+ * taking the floor. A conversation's round is over when the `room.activity`
+ * naming its message lands; a Stop fences everything said before it (the next
+ * message opens a fresh round) and a disband ends the room.
  */
-export function activeThread(events: RoomEvent[], now = Date.now()): string | undefined {
+export function queuedThreads(events: RoomEvent[], now = Date.now()): string[] {
   const last = events.at(-1)
-  if (!last || now - last.created_at * 1000 > 35 * 60_000) return undefined
-  const ended = new Set<string>()
-  for (let i = events.length - 1; i >= 0; i--) {
-    const event = events[i]
-    if (event.kind === 'room.stop_requested' || event.kind === 'room.disbanded') return undefined
-    if (TERMINAL.has(event.kind)) ended.add(threadOf(event))
-    else if (event.kind === 'message.user' && !ended.has(threadOf(event))) return threadOf(event)
+  // Hermes gives up on a turn after ~30 minutes; anything older is stale.
+  if (!last || now - last.created_at * 1000 > 35 * 60_000) return []
+  if (events.some((e) => e.kind === 'room.disbanded')) return []
+  const stopped = events.findLast((e) => e.kind === 'room.stop_requested')?.seq ?? 0
+  // The last thing you said in each conversation: the round Hermes would run for it.
+  const asked = new Map<string, RoomEvent>()
+  for (const event of events) {
+    if (event.kind !== 'message.user' || event.seq <= stopped) continue
+    const thread = threadOf(event)
+    const previous = asked.get(thread)
+    if (!previous || event.seq > previous.seq) asked.set(thread, event)
   }
-  return undefined
+  // A round is wrapped up by the room.activity that names the message it ran for.
+  const wrapped = (event: RoomEvent) =>
+    events.some(
+      (e) =>
+        e.kind === 'room.activity' &&
+        e.seq > event.seq &&
+        (typeof e.payload.discussion_event_id === 'string'
+          ? e.payload.discussion_event_id === event.event_id
+          : threadOf(e) === threadOf(event)),
+    )
+  return [...asked.values()]
+    .filter((event) => !wrapped(event))
+    .sort((a, b) => a.seq - b.seq)
+    .map(threadOf)
 }
+
+/** The conversation the room is working in right now, if a round is running there. */
+export const activeThread = (events: RoomEvent[], now = Date.now()): string | undefined =>
+  queuedThreads(events, now)[0]
