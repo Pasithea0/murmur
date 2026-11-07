@@ -122,7 +122,7 @@ On umbrelOS, your agents can work with the Umbrel itself: its apps, files and mo
   <img src="docs/readme/group-wide-light.png" alt="Atlas, Juniper and Basil planning a weekend in Lisbon together" width="100%">
 </picture>
 
-Put a few agents in one room and let them work it out together. Mention one with **@** to ask just them. Each one speaks in its own colour. Tap the group for its conversations, each with its own history: start a new one with the pencil whenever you want a clean slate, and the group and its agents stay exactly as they are.
+Put a few agents in one room and let them work it out together. Mention one with **@** to ask just them; mention several and they each answer, taking turns in the order the group's members were picked. Each one speaks in its own colour. Tap the group for its conversations, each with its own history: start a new one with the pencil whenever you want a clean slate, and the group and its agents stay exactly as they are. The room works through its conversations one at a time, oldest first, so one you start while another is mid-round waits its turn.
 
 ### Text them on WhatsApp and Telegram
 

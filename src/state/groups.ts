@@ -25,6 +25,7 @@ import {
   liveFromLog,
   MAIN_THREAD,
   memberOf,
+  queuedThreads,
   TERMINAL,
   threadOf,
   visibleText,
@@ -55,7 +56,13 @@ type PendingAction = {
   member_id?: string
   approval?: { command?: string; description?: string; request_id?: string; pattern_key?: string }
 }
-type DriverStatus = { working?: boolean; blocked?: boolean; pending_actions?: PendingAction[] }
+type DriverStatus = {
+  working?: boolean
+  blocked?: boolean
+  pending_actions?: PendingAction[]
+  /** Who Hermes is answering with right now, the one it admitted first at the front. */
+  member_activity?: { member_id: string; status: string }[]
+}
 type StateResult = { room: WireRoom; driver_status?: DriverStatus }
 type LogResult = { events: RoomEvent[]; cursor?: number; latest_seq?: number; has_more?: boolean }
 
@@ -571,6 +578,15 @@ type Live = {
   trail: Record<string, ToolItem[]>
   /** When Stop was pressed, until Hermes confirms the round is over. */
   stopping?: number
+}
+
+/**
+ * A room's conversation as it is shown: this conversation's own slice of the
+ * room, plus where it stands in the room's queue.
+ */
+type Shown = Live & {
+  /** Conversations Hermes works before this one; 0 while this one has the floor. */
+  ahead: number
 }
 
 export const useGroupLive = create<{ rooms: Record<string, Live> }>(() => ({ rooms: {} }))
@@ -1228,9 +1244,11 @@ function predictNext(
     for (const m of responders) {
       if (!settled.has(m) && unlogged.delete(m)) settled.add(m)
     }
-    const order = [...roster.slice(round % roster.length), ...roster.slice(0, round % roster.length)]
-    const next = order.find((m) => responders.has(m.id) && !settled.has(m.id))
-    if (next) return next.id
+    const order = [...responders].sort((a, b) => roster.findIndex((m) => m.id === a) - roster.findIndex((m) => m.id === b))
+    // Turned by the round: Hermes rotates the members it asked, not the roster.
+    const turned = order.length ? [...order.slice(round % order.length), ...order.slice(0, round % order.length)] : []
+    const next = turned.find((id) => !settled.has(id))
+    if (next) return next
     // Next round: whoever this round's speakers pulled in.
     const spoken = tail.filter((e) => e.kind === 'message.member' && Number(e.payload.round_index ?? 0) === round)
     responders = new Set(
@@ -1379,7 +1397,7 @@ function presentLog(
 }
 
 /** The log's conversation plus what's happening now: sends, turns being written, who's next. */
-function present(live: Live, cast: Cast, streams: Stream[], history: ChatItem[]): View {
+function present(live: Shown, cast: Cast, streams: Stream[], history: ChatItem[]): View {
   const { members, roster, speaker, say, approvalItem } = cast
   const items = [...history]
 
@@ -1443,18 +1461,33 @@ function present(live: Live, cast: Cast, streams: Stream[], history: ChatItem[])
   const stopping = Boolean(live.stopping) && !pendingOut
   if (stopping) return { items, working, stopping, active: undefined }
 
+  // Another conversation in the room has the floor: Hermes runs them one at a
+  // time, oldest first, so this one waits its turn rather than pretending to
+  // work (or offering a Stop that would stop the room).
+  if (live.ahead > 0 && live.driver?.working)
+    items.push({
+      kind: 'notice',
+      id: 'queued',
+      text: 'Another conversation in this group has the floor. This one goes next.',
+    })
+
   const waiting = live.approvals.find((a) => a.status === 'pending')
   if (waiting) active = { member: speaker(waiting.member), phase: 'waiting' }
 
-  // Between turns, or before we can hear anyone: say who's up next if we know.
+  // Between turns, or before we can hear anyone: Hermes says who it admitted to
+  // answer (groups.state → driver_status.member_activity, in admission order),
+  // and the log's own reading is the fallback for the moment before that lands.
+  const answering = live.driver?.member_activity?.find((a) => a.status === 'running')?.member_id
   if (!active && working) {
     const pendingText = pendingOut ? toHandles(pendingOut.text, roster) : undefined
-    const next = predictNext(
-      live.events,
-      members,
-      pendingText,
-      streams.filter((s) => s.done).map((s) => s.member),
-    )
+    const next =
+      answering ??
+      predictNext(
+        live.events,
+        members,
+        pendingText,
+        streams.filter((s) => s.done).map((s) => s.member),
+      )
     if (next) {
       const who = speaker(next)
       active = { member: who, phase: 'thinking' }
@@ -1535,12 +1568,17 @@ export function useGroup(id: string, thread?: string): GroupView {
   // A room holds any number of conversations. Everything the room does is
   // tagged with the one it belongs to — the round a message starts, each
   // member's turn, a permission request — so only the open conversation is
-  // shown, and only the work being done in it. Another conversation's round,
-  // running at the same time, stays there until you open it.
+  // shown, and only the work being done in it. Hermes works a room's
+  // conversations one at a time, oldest first, so the ones behind wait their
+  // turn: the work stays in the conversation that has the floor, and a
+  // conversation waiting for it says so rather than showing a Stop.
   const open = thread ?? live?.thread ?? MAIN_THREAD
   const all = live?.events ?? NONE
-  const running = useMemo(() => activeThread(all), [all])
+  const queue = useMemo(() => queuedThreads(all), [all])
+  const running = queue[0]
   const here = !running || running === open
+  // How many conversations the room works before this one, when it is waiting.
+  const ahead = here ? 0 : Math.max(0, queue.indexOf(open))
   const events = useMemo(() => all.filter((e) => threadOf(e) === open), [all, open])
 
   // Reading a conversation is reading it: it stops showing a dot in the list.
@@ -1575,9 +1613,10 @@ export function useGroup(id: string, thread?: string): GroupView {
             outgoing: live.outgoing.filter((o) => o.thread === open),
             approvals: here ? live.approvals : NO_APPROVALS,
             stopping: here ? live.stopping : undefined,
+            ahead,
           }
         : undefined,
-    [live, events, open, here],
+    [live, events, open, here, ahead],
   )
   const view = useMemo(() => (scoped ? present(scoped, cast, streams, history) : QUIET), [scoped, cast, streams, history])
   const kept = useRef<ChatItem[]>([])
